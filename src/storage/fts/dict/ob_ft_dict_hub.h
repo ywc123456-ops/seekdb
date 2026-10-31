@@ -19,6 +19,7 @@
 
 #include "lib/charset/ob_charset.h"
 #include "lib/lock/ob_bucket_lock.h"
+#include "lib/lock/ob_mutex.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 
 namespace oceanbase
@@ -93,10 +94,18 @@ private:
 };
 
 class ObFTCacheRangeContainer;
+class ObFTSharedDict;
+class ObIFTDict;
 class ObFTDictHub
 {
 public:
-  ObFTDictHub() : is_inited_(false), dict_map_(), rw_dict_lock_() {}
+  ObFTDictHub()
+      : is_inited_(false),
+        dict_map_(),
+        rw_dict_lock_(),
+        shared_dict_mutex_(),
+        shared_dicts_{nullptr, nullptr, nullptr}
+  {}
   ~ObFTDictHub() {}
 
   int init();
@@ -106,6 +115,10 @@ public:
   int build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
 
   int load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container);
+
+  // Returns a process-wide, read-only dictionary that can be shared by all
+  // parsers. The first caller builds it; subsequent callers reuse it.
+  int get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict);
 
 private:
   int get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info);
@@ -118,6 +131,12 @@ private:
   // holds info of dict
   hash::ObHashMap<ObFTDictInfoKey, ObFTDictInfo> dict_map_;
   ObBucketLock rw_dict_lock_;
+
+  // The built-in IK dictionaries are immutable for the lifetime of the
+  // process. Keep one shared range dictionary per type instead of rebuilding
+  // ObFTRangeDict (and re-fetching every KV-cache range) for every parser.
+  lib::ObMutex shared_dict_mutex_;
+  ObFTSharedDict *shared_dicts_[3];
 };
 
 } //  namespace storage

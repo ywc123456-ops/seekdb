@@ -18,6 +18,7 @@
 
 #include "storage/fts/dict/ob_ft_dict_hub.h"
 
+#include "lib/allocator/ob_malloc.h"
 #include "lib/ob_errno.h"
 #include "lib/oblog/ob_log_module.h"
 #include "lib/utility/ob_macro_utils.h"
@@ -28,6 +29,57 @@ namespace oceanbase
 {
 namespace storage
 {
+
+// Owns the pinned KV-cache ranges and the read-only ObFTRangeDict built from
+// them. Once initialized, this object is safe to share between parser threads.
+class ObFTSharedDict final
+{
+public:
+  explicit ObFTSharedDict(const ObFTDictDesc &desc)
+      : alloc_(lib::ObMemAttr("FTSharedDict")),
+        container_(alloc_),
+        desc_(desc),
+        dict_(nullptr)
+  {}
+  ~ObFTSharedDict()
+  {
+    if (OB_NOT_NULL(dict_)) {
+      OB_DELETEx(ObFTRangeDict, &alloc_, dict_);
+      dict_ = nullptr;
+    }
+  }
+
+  int init(ObFTDictHub &hub)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(hub.load_cache(desc_, container_))) {
+      if (OB_ENTRY_NOT_EXIST != ret) {
+      } else if (OB_FAIL(hub.build_cache(desc_, container_))) {
+      }
+    }
+    if (OB_SUCC(ret)) {
+      ObFTRangeDict *dict = OB_NEWx(ObFTRangeDict, &alloc_, alloc_, &container_, desc_);
+      if (OB_ISNULL(dict)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(dict->init())) {
+        OB_DELETEx(ObFTRangeDict, &alloc_, dict);
+        dict = nullptr;
+      } else {
+        dict_ = dict;
+      }
+    }
+    return ret;
+  }
+
+  ObIFTDict *get_dict() const { return dict_; }
+
+private:
+  ObArenaAllocator alloc_;
+  ObFTCacheRangeContainer container_;
+  ObFTDictDesc desc_;
+  ObFTRangeDict *dict_;
+};
+
 int ObFTDictHub::init()
 {
   static constexpr int K_MAX_DICT_BUCKET = 128; // for now, only built-in dicts.
@@ -43,6 +95,15 @@ int ObFTDictHub::init()
 int ObFTDictHub::destroy()
 {
   int ret = OB_SUCCESS;
+  {
+    lib::ObMutexGuard guard(shared_dict_mutex_);
+    for (int64_t i = 0; i < 3; ++i) {
+      if (OB_NOT_NULL(shared_dicts_[i])) {
+        OB_DELETE(ObFTSharedDict, "FTSharedDict", shared_dicts_[i]);
+        shared_dicts_[i] = nullptr;
+      }
+    }
+  }
   is_inited_ = false;
   return ret;
 }
@@ -114,6 +175,49 @@ int ObFTDictHub::load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &c
   return ret;
 }
 
+int ObFTDictHub::get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  int64_t idx = -1;
+  dict = nullptr;
+
+  switch (desc.type_) {
+    case ObFTDictType::DICT_IK_MAIN:
+      idx = 0;
+      break;
+    case ObFTDictType::DICT_IK_QUAN:
+      idx = 1;
+      break;
+    case ObFTDictType::DICT_IK_STOP:
+      idx = 2;
+      break;
+    default:
+      ret = OB_NOT_SUPPORTED;
+      break;
+  }
+
+  if (OB_SUCC(ret)) {
+    lib::ObMutexGuard guard(shared_dict_mutex_);
+    if (OB_ISNULL(shared_dicts_[idx])) {
+      ObFTSharedDict *entry = OB_NEW(ObFTSharedDict, "FTSharedDict", desc);
+      if (OB_ISNULL(entry)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(entry->init(*this))) {
+        OB_DELETE(ObFTSharedDict, "FTSharedDict", entry);
+      } else {
+        shared_dicts_[idx] = entry;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      dict = shared_dicts_[idx]->get_dict();
+      if (OB_ISNULL(dict)) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
+  }
+
+  return ret;
+}
 
 int ObFTDictHub::get_dict_info(const ObFTDictInfoKey &key, ObFTDictInfo &info)
 {

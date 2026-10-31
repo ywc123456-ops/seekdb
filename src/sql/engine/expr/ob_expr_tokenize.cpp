@@ -16,6 +16,8 @@
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
+#include <cstring>
+
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
@@ -39,6 +41,24 @@ namespace oceanbase
 {
 namespace sql
 {
+namespace
+{
+// TOKENIZE is deterministic for a given text, parser and collation. Keep the
+// last packed result per thread so repeated tokenization of the same text
+// (common in search workloads) does not rebuild the parser and JSON tree.
+struct TokenizeResultCache
+{
+  common::ObArenaAllocator alloc_;
+  common::ObString key_;
+  common::ObString raw_;
+  bool valid_;
+
+  TokenizeResultCache()
+      : alloc_(ObMemAttr("TokCache")), key_(), raw_(), valid_(false)
+  {}
+};
+} // namespace
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -64,12 +84,90 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else {
+    static thread_local TokenizeResultCache result_cache;
+
+    const int64_t key_len = param.fulltext_.length()
+                          + param.parser_name_.length()
+                          + param.properties_.length()
+                          + 2;
+    const bool can_cache = key_len <= 4096;
+    bool cache_hit = false;
+
+    if (can_cache && result_cache.valid_ && result_cache.key_.length() == key_len) {
+      const char *key = result_cache.key_.ptr();
+      int64_t off = 0;
+      bool same = true;
+
+      if (param.fulltext_.length() > 0) {
+        same = (0 == std::memcmp(key + off, param.fulltext_.ptr(), param.fulltext_.length()));
+        off += param.fulltext_.length();
+      }
+      if (same && param.parser_name_.length() > 0) {
+        same = (0 == std::memcmp(key + off, param.parser_name_.ptr(), param.parser_name_.length()));
+        off += param.parser_name_.length();
+      }
+      if (same && param.properties_.length() > 0) {
+        same = (0 == std::memcmp(key + off, param.properties_.ptr(), param.properties_.length()));
+        off += param.properties_.length();
+      }
+      if (same) {
+        same = (key[off++] == static_cast<char>(param.output_mode_));
+      }
+      if (same) {
+        same = (key[off++] == static_cast<char>(param.meta_.get_collation_type()));
+      }
+      cache_hit = same;
+    }
+
+    if (cache_hit) {
+      ObString raw(result_cache.raw_.length(), result_cache.raw_.ptr());
+      if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw))) {
+      }
+    } else {
+      char *key_buf = nullptr;
+      if (can_cache) {
+        result_cache.valid_ = false;
+        result_cache.alloc_.reset();
+        if (OB_NOT_NULL(key_buf = static_cast<char *>(result_cache.alloc_.alloc(key_len)))) {
+          int64_t off = 0;
+          if (param.fulltext_.length() > 0) {
+            std::memcpy(key_buf + off, param.fulltext_.ptr(), param.fulltext_.length());
+            off += param.fulltext_.length();
+          }
+          if (param.parser_name_.length() > 0) {
+            std::memcpy(key_buf + off, param.parser_name_.ptr(), param.parser_name_.length());
+            off += param.parser_name_.length();
+          }
+          if (param.properties_.length() > 0) {
+            std::memcpy(key_buf + off, param.properties_.ptr(), param.properties_.length());
+            off += param.properties_.length();
+          }
+          key_buf[off++] = static_cast<char>(param.output_mode_);
+          key_buf[off++] = static_cast<char>(param.meta_.get_collation_type());
+          result_cache.key_.assign_ptr(key_buf, static_cast<int32_t>(key_len));
+        }
+      }
+
+      if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+      } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                         ctx,
+                                                         temp_allocator,
+                                                         json_result,
+                                                         expr_datum))) {
+      } else if (OB_NOT_NULL(key_buf) && OB_NOT_NULL(json_result)) {
+        ObString raw;
+        int tmp_ret = share::ObJsonWrapper::get_raw_binary(json_result, raw, &temp_allocator);
+        if (OB_SUCCESS == tmp_ret && raw.length() > 0) {
+          char *raw_buf = static_cast<char *>(result_cache.alloc_.alloc(raw.length()));
+          if (OB_NOT_NULL(raw_buf)) {
+            std::memcpy(raw_buf, raw.ptr(), raw.length());
+            result_cache.raw_.assign_ptr(raw_buf, raw.length());
+            result_cache.valid_ = true;
+          }
+        }
+      }
+    }
   }
 
   return ret;
