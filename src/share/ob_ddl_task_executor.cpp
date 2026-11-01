@@ -19,6 +19,8 @@
 #include "lib/thread/ob_thread_name.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/rc/ob_server_runtime.h"
+#include "share/config/ob_server_config.h" // for config::cpu_count
+#include "lib/cpu/ob_cpu_topology.h" // for common::get_cpu_num
 #include "share/ob_force_print_log.h"
 
 #define USING_LOG_PREFIX STORAGE
@@ -350,7 +352,18 @@ int ObDDLLocalBuilder::push_task(ObAsyncTask &task)
 
 int64_t ObDDLLocalBuilder::get_thread_cnt_() const
 {
-  return lib::is_mini_mode() ? 1 : 16;
+  if (!lib::is_mini_mode()) {
+    return 16;
+  }
+  // In mini mode the memory is the scarce resource, so only one ddl build runs
+  // at a time.  But the fulltext index build submits the builds of the two
+  // inverted index tables at the same time, and with a single worker they are
+  // executed one after another, which doubles the wall clock time of the
+  // build.  Two workers are enough to let the two builds of one fulltext index
+  // overlap.  The memory of a build is bounded by the sql work area of the
+  // tenant, so the memory used by the concurrent builds stays bounded.
+  const int64_t cpu_cnt = config::cpu_count() > 0 ? config::cpu_count() : common::get_cpu_num();
+  return cpu_cnt >= 4 ? 2 : 1;
 }
 
 }  // end namespace share
