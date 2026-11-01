@@ -28,6 +28,7 @@ namespace oceanbase
 namespace sql
 {
 class MultimodeAlloctor;
+class TokenizeCache;
 class ObExprTokenize : public ObStringExprOperator
 {
 public:
@@ -63,13 +64,19 @@ private:
     int parse_json_param(const ObIJsonBase *obj);
 
     // check and reform parser properties to standard format
-    int reform_parser_properties(const ObString &properties);
+    int reform_parser_properties(const ObString &properties, ObString &formatted);
     int try_load_dictionary_for_ik();
 
   public:
     // for property and tmp json string
     mutable ObArenaAllocator allocator_;
+    // the inner parser name, e.g. "ik.1"
     ObString parser_name_;
+    // the parser name given by the user, e.g. "ik"
+    ObString raw_parser_name_;
+    // the parser properties given by the user
+    ObString raw_properties_;
+    // the parser properties in standard format
     ObString properties_;
     ObObjMeta meta_;
     ObString fulltext_;
@@ -81,16 +88,22 @@ private:
   };
 
 private:
-  static int parse_param(const ObExpr &expr,
-                         ObEvalCtx &ctx,
-                         common::ObArenaAllocator &allocator,
-                         TokenizeParam &param);
+  static int parse_raw_param(const ObExpr &expr,
+                             ObEvalCtx &ctx,
+                             TokenizeParam &param);
+
+  static int prepare_param(TokenizeParam &param, TokenizeCache &cache);
+
+  static int tokenize_and_pack(const ObExpr &expr,
+                               ObEvalCtx &ctx,
+                               common::ObArenaAllocator &allocator,
+                               TokenizeParam &param,
+                               ObDatum &expr_datum);
 
   static int parse_fulltext(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
-  static int parse_parser_name(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
+  static int parse_raw_parser_name(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param);
   static int parse_parser_properties(const ObExpr &expr,
                                      ObEvalCtx &ctx,
-                                     MultimodeAlloctor &mm_alloc,
                                      TokenizeParam &param);
 
   static int tokenize_fulltext(const TokenizeParam &param,

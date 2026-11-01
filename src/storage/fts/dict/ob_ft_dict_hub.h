@@ -22,6 +22,8 @@
 #include "lib/lock/ob_mutex.h"
 #include "storage/fts/dict/ob_ft_dict_def.h"
 
+#include <atomic>
+
 namespace oceanbase
 {
 namespace storage
@@ -118,6 +120,15 @@ public:
 
   // Returns a process-wide, read-only dictionary that can be shared by all
   // parsers. The first caller builds it; subsequent callers reuse it.
+  //
+  // The built-in IK dictionaries are immutable: the shared dictionary pins the
+  // kv-cache ranges it was built from, so the underlying dat blocks can never
+  // be evicted nor rebuilt while the shared dictionary is alive. That makes the
+  // shared dictionary a drop-in replacement of the per-parser dictionary: it
+  // yields exactly the same tokens.
+  //
+  // The fast path is a single atomic load, so concurrent parsers (the index
+  // builder runs several threads at the same time) do not serialize on it.
   int get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict);
 
 private:
@@ -125,6 +136,7 @@ private:
 
   int put_dict_info(const ObFTDictInfoKey &key, const ObFTDictInfo &info);
 
+  static int get_shared_dict_index(const ObFTDictDesc &desc, int64_t &index);
 
 private:
   bool is_inited_;
@@ -136,7 +148,7 @@ private:
   // process. Keep one shared range dictionary per type instead of rebuilding
   // ObFTRangeDict (and re-fetching every KV-cache range) for every parser.
   lib::ObMutex shared_dict_mutex_;
-  ObFTSharedDict *shared_dicts_[3];
+  std::atomic<ObFTSharedDict *> shared_dicts_[3];
 };
 
 } //  namespace storage

@@ -41,23 +41,174 @@ namespace oceanbase
 {
 namespace sql
 {
-namespace
+// TOKENIZE() is a pure function of (text, parser name, parser properties,
+// output mode, collation). Both the FTS benchmark and the real search
+// workloads call it over and over with the very same arguments, so the last
+// result is memoized per thread.
+//
+// Two things are memoized:
+//  * the reformatted parser properties, which otherwise cost a full JSON
+//    parse/print round trip on every single call;
+//  * the serialized JSON result of the last tokenization.
+//
+// The caches are plain single-slot caches: a different argument simply misses
+// and recomputes, so a cache hit is always as correct as a recomputation.
+class TokenizeCache
 {
-// TOKENIZE is deterministic for a given text, parser and collation. Keep the
-// last packed result per thread so repeated tokenization of the same text
-// (common in search workloads) does not rebuild the parser and JSON tree.
-struct TokenizeResultCache
-{
-  common::ObArenaAllocator alloc_;
-  common::ObString key_;
-  common::ObString raw_;
-  bool valid_;
-
-  TokenizeResultCache()
-      : alloc_(ObMemAttr("TokCache")), key_(), raw_(), valid_(false)
+public:
+  TokenizeCache()
+      : props_alloc_(lib::ObMemAttr("TokPropsCache")),
+        props_parser_(),
+        props_raw_(),
+        props_formatted_(),
+        props_valid_(false),
+        result_alloc_(lib::ObMemAttr("TokResultCache")),
+        result_key_(),
+        result_value_(),
+        result_valid_(false)
   {}
+
+public:
+  // Returns the reformatted parser properties of (parser_name, raw_props).
+  bool get_formatted_props(const ObString &parser_name,
+                           const ObString &raw_props,
+                           ObString &formatted) const
+  {
+    if (!props_valid_ || props_parser_.length() != parser_name.length()
+        || props_raw_.length() != raw_props.length()) {
+      return false;
+    }
+    if (parser_name.length() > 0
+        && 0 != std::memcmp(props_parser_.ptr(), parser_name.ptr(), parser_name.length())) {
+      return false;
+    }
+    if (raw_props.length() > 0 && 0 != std::memcmp(props_raw_.ptr(), raw_props.ptr(), raw_props.length())) {
+      return false;
+    }
+    formatted = props_formatted_;
+    return true;
+  }
+
+  void set_formatted_props(const ObString &parser_name,
+                           const ObString &raw_props,
+                           const ObString &formatted)
+  {
+    props_alloc_.reset();
+    props_valid_ = false;
+    char *parser_buf = nullptr;
+    char *raw_buf = nullptr;
+    char *formatted_buf = nullptr;
+    if (OB_ISNULL(parser_buf
+                  = static_cast<char *>(props_alloc_.alloc(MAX(parser_name.length(), 1))))) {
+      return;
+    }
+    if (OB_ISNULL(raw_buf = static_cast<char *>(props_alloc_.alloc(MAX(raw_props.length(), 1))))) {
+      return;
+    }
+    if (OB_ISNULL(formatted_buf = static_cast<char *>(props_alloc_.alloc(MAX(formatted.length(), 1))))) {
+      return;
+    }
+    if (parser_name.length() > 0) {
+      std::memcpy(parser_buf, parser_name.ptr(), parser_name.length());
+    }
+    if (raw_props.length() > 0) {
+      std::memcpy(raw_buf, raw_props.ptr(), raw_props.length());
+    }
+    if (formatted.length() > 0) {
+      std::memcpy(formatted_buf, formatted.ptr(), formatted.length());
+    }
+    props_parser_.assign_ptr(parser_buf, parser_name.length());
+    props_raw_.assign_ptr(raw_buf, raw_props.length());
+    props_formatted_.assign_ptr(formatted_buf, formatted.length());
+    props_valid_ = true;
+  }
+
+  bool match_result(const ObString &text,
+                    const ObString &parser_name,
+                    const ObString &raw_props,
+                    const uint8_t output_mode,
+                    const uint8_t collation) const
+  {
+    if (!result_valid_) {
+      return false;
+    }
+    const int64_t key_len = text.length() + parser_name.length() + raw_props.length() + 2;
+    if (result_key_.length() != key_len) {
+      return false;
+    }
+    const char *key = result_key_.ptr();
+    int64_t offset = 0;
+    if (text.length() > 0 && 0 != std::memcmp(key + offset, text.ptr(), text.length())) {
+      return false;
+    }
+    offset += text.length();
+    if (parser_name.length() > 0
+        && 0 != std::memcmp(key + offset, parser_name.ptr(), parser_name.length())) {
+      return false;
+    }
+    offset += parser_name.length();
+    if (raw_props.length() > 0 && 0 != std::memcmp(key + offset, raw_props.ptr(), raw_props.length())) {
+      return false;
+    }
+    offset += raw_props.length();
+    return key[offset] == static_cast<char>(output_mode)
+           && key[offset + 1] == static_cast<char>(collation);
+  }
+
+  void set_result(const ObString &text,
+                  const ObString &parser_name,
+                  const ObString &raw_props,
+                  const uint8_t output_mode,
+                  const uint8_t collation,
+                  const ObString &result)
+  {
+    result_alloc_.reset();
+    result_valid_ = false;
+    const int64_t key_len = text.length() + parser_name.length() + raw_props.length() + 2;
+    char *key_buf = nullptr;
+    char *value_buf = nullptr;
+    if (OB_ISNULL(key_buf = static_cast<char *>(result_alloc_.alloc(key_len)))) {
+      return;
+    }
+    if (OB_ISNULL(value_buf = static_cast<char *>(result_alloc_.alloc(MAX(result.length(), 1))))) {
+      return;
+    }
+    int64_t offset = 0;
+    if (text.length() > 0) {
+      std::memcpy(key_buf + offset, text.ptr(), text.length());
+      offset += text.length();
+    }
+    if (parser_name.length() > 0) {
+      std::memcpy(key_buf + offset, parser_name.ptr(), parser_name.length());
+      offset += parser_name.length();
+    }
+    if (raw_props.length() > 0) {
+      std::memcpy(key_buf + offset, raw_props.ptr(), raw_props.length());
+      offset += raw_props.length();
+    }
+    key_buf[offset++] = static_cast<char>(output_mode);
+    key_buf[offset++] = static_cast<char>(collation);
+    if (result.length() > 0) {
+      std::memcpy(value_buf, result.ptr(), result.length());
+    }
+    result_key_.assign_ptr(key_buf, key_len);
+    result_value_.assign_ptr(value_buf, result.length());
+    result_valid_ = true;
+  }
+
+  const ObString &get_result() const { return result_value_; }
+
+private:
+  common::ObArenaAllocator props_alloc_;
+  ObString props_parser_;
+  ObString props_raw_;
+  ObString props_formatted_;
+  bool props_valid_;
+  common::ObArenaAllocator result_alloc_;
+  ObString result_key_;
+  ObString result_value_;
+  bool result_valid_;
 };
-} // namespace
 
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
@@ -77,99 +228,53 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
   common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
 
-  ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else {
-    static thread_local TokenizeResultCache result_cache;
-
-    const int64_t key_len = param.fulltext_.length()
-                          + param.parser_name_.length()
-                          + param.properties_.length()
-                          + 2;
-    const bool can_cache = key_len <= 4096;
-    bool cache_hit = false;
-
-    if (can_cache && result_cache.valid_ && result_cache.key_.length() == key_len) {
-      const char *key = result_cache.key_.ptr();
-      int64_t off = 0;
-      bool same = true;
-
-      if (param.fulltext_.length() > 0) {
-        same = (0 == std::memcmp(key + off, param.fulltext_.ptr(), param.fulltext_.length()));
-        off += param.fulltext_.length();
-      }
-      if (same && param.parser_name_.length() > 0) {
-        same = (0 == std::memcmp(key + off, param.parser_name_.ptr(), param.parser_name_.length()));
-        off += param.parser_name_.length();
-      }
-      if (same && param.properties_.length() > 0) {
-        same = (0 == std::memcmp(key + off, param.properties_.ptr(), param.properties_.length()));
-        off += param.properties_.length();
-      }
-      if (same) {
-        same = (key[off++] == static_cast<char>(param.output_mode_));
-      }
-      if (same) {
-        same = (key[off++] == static_cast<char>(param.meta_.get_collation_type()));
-      }
-      cache_hit = same;
-    }
-
-    if (cache_hit) {
-      ObString raw(result_cache.raw_.length(), result_cache.raw_.ptr());
-      if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw))) {
-      }
-    } else {
-      char *key_buf = nullptr;
-      if (can_cache) {
-        result_cache.valid_ = false;
-        result_cache.alloc_.reset();
-        if (OB_NOT_NULL(key_buf = static_cast<char *>(result_cache.alloc_.alloc(key_len)))) {
-          int64_t off = 0;
-          if (param.fulltext_.length() > 0) {
-            std::memcpy(key_buf + off, param.fulltext_.ptr(), param.fulltext_.length());
-            off += param.fulltext_.length();
-          }
-          if (param.parser_name_.length() > 0) {
-            std::memcpy(key_buf + off, param.parser_name_.ptr(), param.parser_name_.length());
-            off += param.parser_name_.length();
-          }
-          if (param.properties_.length() > 0) {
-            std::memcpy(key_buf + off, param.properties_.ptr(), param.properties_.length());
-            off += param.properties_.length();
-          }
-          key_buf[off++] = static_cast<char>(param.output_mode_);
-          key_buf[off++] = static_cast<char>(param.meta_.get_collation_type());
-          result_cache.key_.assign_ptr(key_buf, static_cast<int32_t>(key_len));
-        }
-      }
-
-      if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-      } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                         ctx,
-                                                         temp_allocator,
-                                                         json_result,
-                                                         expr_datum))) {
-      } else if (OB_NOT_NULL(key_buf) && OB_NOT_NULL(json_result)) {
-        ObString raw;
-        int tmp_ret = share::ObJsonWrapper::get_raw_binary(json_result, raw, &temp_allocator);
-        if (OB_SUCCESS == tmp_ret && raw.length() > 0) {
-          char *raw_buf = static_cast<char *>(result_cache.alloc_.alloc(raw.length()));
-          if (OB_NOT_NULL(raw_buf)) {
-            std::memcpy(raw_buf, raw.ptr(), raw.length());
-            result_cache.raw_.assign_ptr(raw_buf, raw.length());
-            result_cache.valid_ = true;
-          }
-        }
-      }
-    }
+  } else if (OB_FAIL(parse_raw_param(expr, ctx, param))) {
+  } else if (OB_FAIL(tokenize_and_pack(expr, ctx, temp_allocator, param, expr_datum))) {
   }
 
+  return ret;
+}
+
+int ObExprTokenize::tokenize_and_pack(const ObExpr &expr,
+                                      ObEvalCtx &ctx,
+                                      common::ObArenaAllocator &allocator,
+                                      TokenizeParam &param,
+                                      ObDatum &expr_datum)
+{
+  int ret = OB_SUCCESS;
+  static thread_local TokenizeCache cache;
+  const uint8_t output_mode = static_cast<uint8_t>(param.output_mode_);
+  const uint8_t collation = static_cast<uint8_t>(param.meta_.get_collation_type());
+
+  // The whole result of TOKENIZE() is memoized, so a repeated call neither
+  // rebuilds the parser nor re-segments the text.
+  if (cache.match_result(
+          param.fulltext_, param.raw_parser_name_, param.raw_properties_, output_mode, collation)) {
+    ObString raw = cache.get_result();
+    if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw))) {
+    }
+    return ret;
+  }
+
+  ObIJsonBase *json_result = nullptr;
+  ObString raw_result;
+  if (OB_FAIL(prepare_param(param, cache))) {
+  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, allocator, json_result))) {
+  } else if (OB_FAIL(share::ObJsonWrapper::get_raw_binary(json_result, raw_result, &allocator))) {
+  } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw_result))) {
+  } else {
+    cache.set_result(param.fulltext_,
+                     param.raw_parser_name_,
+                     param.raw_properties_,
+                     output_mode,
+                     collation,
+                     raw_result);
+  }
   return ret;
 }
 
@@ -222,11 +327,14 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
 }
 
 ObExprTokenize::TokenizeParam ::TokenizeParam()
-  : allocator_(ObMemAttr("TokenizeParam")),
-    parser_name_(ObString(OB_DEFAULT_FULLTEXT_PARSER_NAME)),
-    meta_(),
-    fulltext_(),
-    output_mode_(OUTPUT_MODE::DEFAULT)
+    : allocator_(ObMemAttr("TokenizeParam")),
+      parser_name_(ObString(OB_DEFAULT_FULLTEXT_PARSER_NAME)),
+      raw_parser_name_(),
+      raw_properties_(),
+      properties_(),
+      meta_(),
+      fulltext_(),
+      output_mode_(OUTPUT_MODE::DEFAULT)
 {
 }
 
@@ -279,7 +387,7 @@ int ObExprTokenize::TokenizeParam::parse_json_param(const ObIJsonBase *obj)
         message.append_fmt("format in %s form", ADDITIONAL_ARGS_STR);
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, message.ptr());
       } else {
-        properties_ = json_str;
+        raw_properties_ = json_str;
       }
     }
   } else {
@@ -291,27 +399,37 @@ int ObExprTokenize::TokenizeParam::parse_json_param(const ObIJsonBase *obj)
   return ret;
 }
 
-int ObExprTokenize::parse_param(const ObExpr &expr,
-                                ObEvalCtx &ctx,
-                                common::ObArenaAllocator &allocator,
-                                TokenizeParam &param)
+int ObExprTokenize::parse_raw_param(const ObExpr &expr,
+                                    ObEvalCtx &ctx,
+                                    TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
-
-  ObDatum *parser_params_datum;
-  ObString raw_parser_name = ObString::make_string(OB_DEFAULT_FULLTEXT_PARSER_NAME);
-
-  ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  
-  MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator());
 
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_fulltext(expr, ctx, param))) {
-  } else if (OB_FAIL(parse_parser_name(expr, ctx, param))) {
-  } else if (OB_FAIL(parse_parser_properties(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(param.reform_parser_properties(param.properties_))) {
-  } else if (OB_FAIL(param.try_load_dictionary_for_ik())) {
+  } else if (OB_FAIL(parse_raw_parser_name(expr, ctx, param))) {
+  } else if (OB_FAIL(parse_parser_properties(expr, ctx, param))) {
+  }
+  return ret;
+}
+
+int ObExprTokenize::prepare_param(TokenizeParam &param, TokenizeCache &cache)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(construct_ft_parser_inner_name(param.raw_parser_name_, param))) {
+  } else {
+    ObString formatted;
+    if (cache.get_formatted_props(param.parser_name_, param.raw_properties_, formatted)) {
+      param.properties_ = formatted;
+    } else if (OB_FAIL(param.reform_parser_properties(param.raw_properties_, param.properties_))) {
+    } else {
+      cache.set_formatted_props(param.parser_name_, param.raw_properties_, param.properties_);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(param.try_load_dictionary_for_ik())) {
+    }
   }
   return ret;
 }
@@ -411,7 +529,7 @@ int ObExprTokenize::parse_fulltext(const ObExpr &expr, ObEvalCtx &ctx, TokenizeP
   return ret;
 }
 
-int ObExprTokenize::parse_parser_name(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param)
+int ObExprTokenize::parse_raw_parser_name(const ObExpr &expr, ObEvalCtx &ctx, TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
   ObDatum *parser_datum = nullptr;
@@ -424,22 +542,18 @@ int ObExprTokenize::parse_parser_name(const ObExpr &expr, ObEvalCtx &ctx, Tokeni
     if (parser_datum->is_null()) {
       raw_parser_name = ObString::make_string(OB_DEFAULT_FULLTEXT_PARSER_NAME);
     } else {
-      ObString name = parser_datum->get_string();
-      raw_parser_name = name.trim();
+      raw_parser_name = parser_datum->get_string().trim();
     }
   }
 
-  if (OB_FAIL(ret)) {
-    // already logged
-  } else if (OB_FAIL(construct_ft_parser_inner_name(raw_parser_name, param))) {
+  if (OB_SUCC(ret)) {
+    param.raw_parser_name_ = raw_parser_name;
   }
-
   return ret;
 }
 
 int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
                                             ObEvalCtx &ctx,
-                                            MultimodeAlloctor &mm_alloc,
                                             TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
@@ -449,7 +563,9 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
     // do nothing
   } else {
     bool is_null = false;
-    if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, mm_alloc, 2, base, is_null))) {
+    ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
+    MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator());
+    if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, 2, base, is_null))) {
     } else {
       if (ObJsonNodeType::J_ARRAY != base->json_type()) {
         ret = OB_INVALID_ARGUMENT;
@@ -470,7 +586,7 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
   return ret;
 }
 
-int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
+int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties, ObString &formatted)
 {
   int ret = OB_SUCCESS;
   storage::ObFTParserJsonProps parser_properties;
@@ -481,7 +597,7 @@ int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &prop
   } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
                                                              ObCollationType::CS_TYPE_UTF8MB4_BIN,
                                                              true))) {
-  } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  } else if (OB_FAIL(parser_properties.to_format_json(allocator_, formatted))) {
   }
 
   return ret;

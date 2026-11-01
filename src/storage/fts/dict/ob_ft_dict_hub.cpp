@@ -98,9 +98,9 @@ int ObFTDictHub::destroy()
   {
     lib::ObMutexGuard guard(shared_dict_mutex_);
     for (int64_t i = 0; i < 3; ++i) {
-      if (OB_NOT_NULL(shared_dicts_[i])) {
-        OB_DELETE(ObFTSharedDict, "FTSharedDict", shared_dicts_[i]);
-        shared_dicts_[i] = nullptr;
+      ObFTSharedDict *entry = shared_dicts_[i].exchange(nullptr, std::memory_order_acq_rel);
+      if (OB_NOT_NULL(entry)) {
+        OB_DELETE(ObFTSharedDict, "FTSharedDict", entry);
       }
     }
   }
@@ -175,41 +175,56 @@ int ObFTDictHub::load_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &c
   return ret;
 }
 
+int ObFTDictHub::get_shared_dict_index(const ObFTDictDesc &desc, int64_t &index)
+{
+  int ret = OB_SUCCESS;
+  index = -1;
+  switch (desc.type_) {
+    case ObFTDictType::DICT_IK_MAIN:
+      index = 0;
+      break;
+    case ObFTDictType::DICT_IK_QUAN:
+      index = 1;
+      break;
+    case ObFTDictType::DICT_IK_STOP:
+      index = 2;
+      break;
+    default:
+      ret = OB_NOT_SUPPORTED;
+      break;
+  }
+  return ret;
+}
+
 int ObFTDictHub::get_shared_dict(const ObFTDictDesc &desc, ObIFTDict *&dict)
 {
   int ret = OB_SUCCESS;
   int64_t idx = -1;
   dict = nullptr;
 
-  switch (desc.type_) {
-    case ObFTDictType::DICT_IK_MAIN:
-      idx = 0;
-      break;
-    case ObFTDictType::DICT_IK_QUAN:
-      idx = 1;
-      break;
-    case ObFTDictType::DICT_IK_STOP:
-      idx = 2;
-      break;
-    default:
-      ret = OB_NOT_SUPPORTED;
-      break;
-  }
-
-  if (OB_SUCC(ret)) {
-    lib::ObMutexGuard guard(shared_dict_mutex_);
-    if (OB_ISNULL(shared_dicts_[idx])) {
-      ObFTSharedDict *entry = OB_NEW(ObFTSharedDict, "FTSharedDict", desc);
+  if (OB_FAIL(get_shared_dict_index(desc, idx))) {
+  } else {
+    // Fast path: the shared dictionary is published before it is used and never
+    // replaced, so a plain atomic load is enough and no lock is needed.
+    ObFTSharedDict *entry = shared_dicts_[idx].load(std::memory_order_acquire);
+    if (OB_ISNULL(entry)) {
+      // Slow path: the first parser of this dictionary type builds it.
+      lib::ObMutexGuard guard(shared_dict_mutex_);
+      entry = shared_dicts_[idx].load(std::memory_order_relaxed);
       if (OB_ISNULL(entry)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else if (OB_FAIL(entry->init(*this))) {
-        OB_DELETE(ObFTSharedDict, "FTSharedDict", entry);
-      } else {
-        shared_dicts_[idx] = entry;
+        ObFTSharedDict *new_entry = OB_NEW(ObFTSharedDict, "FTSharedDict", desc);
+        if (OB_ISNULL(new_entry)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else if (OB_FAIL(new_entry->init(*this))) {
+          OB_DELETE(ObFTSharedDict, "FTSharedDict", new_entry);
+        } else {
+          entry = new_entry;
+          shared_dicts_[idx].store(entry, std::memory_order_release);
+        }
       }
     }
     if (OB_SUCC(ret)) {
-      dict = shared_dicts_[idx]->get_dict();
+      dict = entry->get_dict();
       if (OB_ISNULL(dict)) {
         ret = OB_ERR_UNEXPECTED;
       }
