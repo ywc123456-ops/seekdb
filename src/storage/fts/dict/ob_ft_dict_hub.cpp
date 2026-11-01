@@ -98,10 +98,12 @@ int ObFTDictHub::destroy()
   {
     lib::ObMutexGuard guard(shared_dict_mutex_);
     for (int64_t i = 0; i < 3; ++i) {
-      ObFTSharedDict *entry = shared_dicts_[i].exchange(nullptr, std::memory_order_acq_rel);
-      if (OB_NOT_NULL(entry)) {
-        OB_DELETE(ObFTSharedDict, "FTSharedDict", entry);
-      }
+      // The shared dictionaries are read without holding the lock (see
+      // get_shared_dict), so they must not be freed while a reader may still
+      // hold the pointer.  Only drop the references here; the dictionaries
+      // live as long as the process and the memory is reclaimed when the
+      // process exits.
+      shared_dicts_[i].store(nullptr, std::memory_order_release);
     }
   }
   is_inited_ = false;

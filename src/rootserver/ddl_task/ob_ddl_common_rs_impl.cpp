@@ -532,10 +532,21 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
         if (dest_table_schema->is_vec_vid_rowkey_type()) {
           src_table_schema_version_hint_sql_string.reset();
         }
+        // The fulltext index build produces millions of postings rows which
+        // have to be sorted before they can be written into the auxiliary
+        // tables, and the legacy sorter used by the ddl build is single
+        // threaded.  The rows of a fulltext auxiliary table are keyed by
+        // (word, doc id), so they are unique and the sort only decides the
+        // physical order of the rows.  Use the parallel sort for the
+        // fulltext auxiliary tables to overlap the sort with the scan.
+        const bool use_parallel_sort = share::schema::is_fts_index_aux(dest_table_schema->get_index_type())
+                                       || share::schema::is_fts_doc_word_aux(dest_table_schema->get_index_type());
+        const char *newsort_value = use_parallel_sort ? "true" : "false";
         if (OB_FAIL(ret)) {
         } else {
-          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', 'false') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
+          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', '%.*s') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
               real_parallelism, execution_id, task_id,
+              static_cast<int>(strlen(newsort_value)), newsort_value,
               static_cast<int>(strlen(io_read_hint)), io_read_hint,
               static_cast<int>(new_dest_database_name.length()), new_dest_database_name.ptr(), static_cast<int>(new_dest_table_name.length()), new_dest_table_name.ptr(),
               static_cast<int>(partition_names.length()), partition_names.ptr(),
