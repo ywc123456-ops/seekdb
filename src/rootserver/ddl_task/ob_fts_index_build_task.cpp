@@ -31,7 +31,6 @@
 #include "storage/fts/dict/ob_gen_dic_loader.h"
 #include "storage/fts/dict/ob_dic_loader.h"
 #include "storage/fts/dict/ob_dic_lock.h"
-#include "lib/cpu/ob_cpu_topology.h" // for common::get_cpu_count
 
 using namespace oceanbase::share;
 
@@ -78,42 +77,6 @@ ObFtsIndexBuildTask::~ObFtsIndexBuildTask()
 {
 }
 
-// The fulltext index build is a CPU bound workload: every row of the data
-// table is tokenized and turned into postings, and the postings are then
-// sorted and written into the auxiliary tables.  The DDL parallelism of a
-// table defaults to one, so the build used to run with a single worker even
-// though the server has plenty of CPUs.  This constant bounds the number of
-// workers used for one auxiliary table when the user did not ask for a
-// specific DDL parallelism.
-static constexpr int64_t MAX_FTS_BUILD_PARALLELISM = 4;
-
-int ObFtsIndexBuildTask::decide_build_parallelism(
-    const ObIndexType index_type,
-    const int64_t original_parallelism,
-    int64_t &decided_parallelism)
-{
-  int ret = OB_SUCCESS;
-  if (!share::schema::is_fts_index_aux(index_type)
-      && !share::schema::is_fts_doc_word_aux(index_type)) {
-    // multivalue index and vector spiv index keep the original rule
-    ret = ObFtsIndexBuilderUtil::decide_parallelism(index_type,
-                                                     original_parallelism,
-                                                     decided_parallelism);
-  } else {
-    int64_t parallelism = original_parallelism;
-    if (parallelism <= 1) {
-      // The user did not ask for a specific parallelism, so use the CPUs of
-      // the server instead of building the index serially.
-      const int64_t cpu_count = common::get_cpu_count();
-      parallelism = (cpu_count > 1) ? std::min(cpu_count, MAX_FTS_BUILD_PARALLELISM) : 1;
-    }
-    // All the auxiliary tables are built concurrently and they all share the
-    // same parallelism, so the parallelism is not divided any further here.
-    decided_parallelism = std::max(parallelism, static_cast<int64_t>(1));
-  }
-  return ret;
-}
-
 int ObFtsIndexBuildTask::init(
     const int64_t task_id,
     const ObTableSchema *data_table_schema,
@@ -156,7 +119,7 @@ int ObFtsIndexBuildTask::init(
   } else if (OB_FAIL(deep_copy_index_arg(allocator_,
                                          create_index_arg,
                                          create_index_arg_))) {
-  } else if (OB_FAIL(decide_build_parallelism(create_index_arg.index_type_, parallelism, parallelism_))) {
+  } else if (OB_FAIL(ObFtsIndexBuilderUtil::decide_parallelism(create_index_arg.index_type_, parallelism, parallelism_))) {
   } else {
     LOG_INFO("create_index_arg.index_type_x", K(create_index_arg.index_type_), K(create_index_arg.index_key_));
 
@@ -700,13 +663,6 @@ int ObFtsIndexBuildTask::construct_create_index_arg(
     }
   } else {
     ret = OB_ERR_UNEXPECTED;
-  }
-  if (OB_SUCC(ret) && (share::schema::is_rowkey_doc_aux(index_type)
-                       || share::schema::is_doc_rowkey_aux(index_type))) {
-    // These two tables only map rowkeys to doc ids.  They are tiny compared
-    // to the inverted index tables, so they are built with a single worker
-    // and the remaining CPUs are left to the tables that really need them.
-    arg.parallelism_ = 1;
   }
   return ret;
 }
