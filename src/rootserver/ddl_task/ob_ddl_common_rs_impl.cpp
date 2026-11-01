@@ -542,12 +542,19 @@ int ObDDLTaskUtil::generate_build_replica_sql(const int64_t data_table_id,
         const bool use_parallel_sort = share::schema::is_fts_index_aux(dest_table_schema->get_index_type())
                                        || share::schema::is_fts_doc_word_aux(dest_table_schema->get_index_type());
         const char *newsort_value = use_parallel_sort ? "true" : "false";
+        // A fulltext auxiliary table build is a single threaded pipeline
+        // (scan + tokenize -> sort -> insert).  Running it inside the parallel
+        // execution framework only adds task scheduling, granule pump and row
+        // transfer overhead without adding any parallelism, so the fulltext
+        // build is kept on the plain dml path.
+        const char *use_px_hint = use_parallel_sort ? "" : " use_px";
         if (OB_FAIL(ret)) {
         } else {
-          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', '%.*s') %.*s use_px */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
+          if (OB_FAIL(sql_string.assign_fmt("INSERT /*+ enable_parallel_dml parallel(%ld) opt_param('ddl_execution_id', %ld) opt_param('ddl_task_id', %ld) opt_param('enable_newsort', '%.*s') %.*s%.*s */INTO `%.*s`.`%.*s` %.*s(%.*s) SELECT /*+ index(`%.*s` primary) %.*s */ %.*s from `%.*s`.`%.*s` %.*s as of snapshot %ld %.*s",
               real_parallelism, execution_id, task_id,
               static_cast<int>(strlen(newsort_value)), newsort_value,
               static_cast<int>(strlen(io_read_hint)), io_read_hint,
+              static_cast<int>(strlen(use_px_hint)), use_px_hint,
               static_cast<int>(new_dest_database_name.length()), new_dest_database_name.ptr(), static_cast<int>(new_dest_table_name.length()), new_dest_table_name.ptr(),
               static_cast<int>(partition_names.length()), partition_names.ptr(),
               static_cast<int>(insert_column_sql_string.length()), insert_column_sql_string.ptr(),
