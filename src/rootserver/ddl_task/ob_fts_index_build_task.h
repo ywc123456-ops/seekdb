@@ -124,10 +124,6 @@ private:
   bool is_domain_index(const ObIndexType index_type) const { return share::schema::is_fts_index(index_type) ||
                        share::schema::is_multivalue_index(index_type) || share::schema::is_vec_spiv_index(index_type); }
   int get_next_status(share::ObDDLTaskStatus &next_status);
-  int decide_build_parallelism(
-      const ObIndexType index_type,
-      const int64_t original_parallelism,
-      int64_t &decided_parallelism);
   int prepare_aux_table(
       const ObIndexType index_type,
       bool &task_submitted,
