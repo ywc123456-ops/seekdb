@@ -353,9 +353,11 @@ thread_local ObFTTokenCollector tl_segment_collector;
  * and immutable for the lifetime of the process (see ObFTDictHub), so no
  * further state has to be part of the key.
  *
- * The memo is only used for parsers that copy the word into the allocator of
- * the caller (the casedown flag), so that the replayed words never point
- * into the memo buffer.
+ * The memo is used for every parser.  A parser that copies the word into the
+ * allocator of the caller (the casedown flag) hands a fresh string to the
+ * word map, every other parser keeps the pointer of the word, so the recorded
+ * bytes are copied into the allocator of the caller before they are replayed.
+ * Either way a replayed word never points into the memo buffer.
  */
 class ObFTSegmentMemo final
 {
@@ -396,6 +398,8 @@ public:
   int replay(const uint64_t hash1,
              const uint64_t hash2,
              const int64_t doc_len,
+             const bool copy_word,
+             common::ObIAllocator &allocator,
              ObAddWord &add_word,
              bool &is_hit)
   {
@@ -439,7 +443,23 @@ public:
         ObFTTokenCollector::Token token;
         MEMCPY(&token, pos, sizeof(token));
         pos += sizeof(token);
-        if (OB_FAIL(add_word.process_word(pos, token.word_len_, token.char_cnt_, token.word_freq_))) {
+        const char *word = pos;
+        if (copy_word) {
+          // The parser does not copy the word into the allocator of the
+          // caller, the word map keeps the pointer of the word, so the
+          // recorded bytes have to be copied out of the memo buffer before
+          // they are handed over.  The copy lands in the same allocator the
+          // parser would have used, so the life time of the word is the
+          // same as without the memo.
+          char *buf = static_cast<char *>(allocator.alloc(token.word_len_));
+          if (OB_ISNULL(buf)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            break;
+          }
+          MEMCPY(buf, pos, token.word_len_);
+          word = buf;
+        }
+        if (OB_FAIL(add_word.process_word(word, token.word_len_, token.char_cnt_, token.word_freq_))) {
           break;
         }
         pos += token.word_len_;
@@ -903,15 +923,17 @@ int ObFTParseHelper::segment(
   } else {
     words.reuse();
     ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
-    // The segment memo is only used for the parsers that copy the word into
-    // the allocator of the caller (the casedown flag), so that a replayed
-    // word never points into the memo buffer.
+    // A parser that copies the word into the allocator of the caller (the
+    // casedown flag) hands a fresh string to the word map, every other
+    // parser keeps the pointer of the word, so the recorded bytes are copied
+    // into the allocator of the caller before they are replayed.  Either way
+    // a replayed word never points into the memo buffer.
+    const bool copy_word = !add_word_flag_.casedown();
+    const bool memo_enabled = fulltext_len > 0
+                               && fulltext_len <= ObFTSegmentMemo::MAX_DOC_LEN;
     ObFTSegmentMemo &memo = ObFTSegmentMemo::instance();
     uint64_t hash1 = 0;
     uint64_t hash2 = 0;
-    const bool memo_enabled = add_word_flag_.casedown()
-                               && fulltext_len > 0
-                               && fulltext_len <= ObFTSegmentMemo::MAX_DOC_LEN;
     bool is_hit = false;
     if (memo_enabled) {
       const uint64_t ctx_hash = ObFTSegmentMemo::calc_ctx_hash(
@@ -920,7 +942,8 @@ int ObFTParseHelper::segment(
           parser_desc_,
           parser_property_);
       ObFTSegmentMemo::calc_hash(fulltext, fulltext_len, ctx_hash, hash1, hash2);
-      if (OB_SUCC(memo.replay(hash1, hash2, fulltext_len, add_word, is_hit)) && is_hit) {
+      if (OB_SUCC(memo.replay(hash1, hash2, fulltext_len, copy_word, *allocator_, add_word, is_hit))
+          && is_hit) {
         doc_length = add_word.get_add_word_count();
       } else {
         // miss, segment the document and record the tokens
