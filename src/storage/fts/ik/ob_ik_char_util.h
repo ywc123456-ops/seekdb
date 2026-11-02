@@ -131,6 +131,35 @@ private:
   static
       typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), int>::type
       is_surrogate_low(const char *input, const uint8_t char_len, bool &is_surrogate_low);
+
+  /****************************************************************************************/
+  // Code point level helpers.
+  //
+  // The classification of one character used to decode the very same input
+  // sequence once per check (alpha / arabic / chinese / other cjk / surrogate
+  // high / surrogate low), so a single character could be decoded up to six
+  // times.  The helpers below classify an already decoded code point, so the
+  // input sequence is decoded exactly once per character while the check order
+  // (and therefore the classification result) stays unchanged.
+  /****************************************************************************************/
+  template <ObCharsetType CS_TYPE>
+  static int classify_unicode(const ob_wc_t unicode, CharType &type);
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_surrogate_high_unicode(const ob_wc_t unicode);
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_surrogate_high_unicode(const ob_wc_t unicode);
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_surrogate_low_unicode(const ob_wc_t unicode);
+
+  template <ObCharsetType CS_TYPE>
+  static typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+  is_surrogate_low_unicode(const ob_wc_t unicode);
   /****************************************************************************************/
 
   /*************************  Ignore: some char should not output itself *********************/
@@ -445,29 +474,68 @@ template <ObCharsetType CS_TYPE>
 inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, CharType &type)
 {
   int ret = OB_SUCCESS;
-  bool checker = false;
+  ob_wc_t unicode = 0;
   type = CharType::USELESS;
 
-  if (OB_FAIL(is_alpha<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::ENGLISH_LETTER;
-  } else if (OB_FAIL(is_arabic<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::ARABIC_LETTER;
-  } else if (OB_FAIL(is_chinese<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::CHINESE;
-  } else if (OB_FAIL(is_other_cjk<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::OTHER_CJK;
-  } else if (OB_FAIL(is_surrogate_high<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::SURROGATE_HIGH;
-  } else if (OB_FAIL(is_surrogate_low<CS_TYPE>(input, char_len, checker))) {
-  } else if (checker) {
-    type = CharType::SURROGATE_LOW;
+  // Decode the character once and classify the decoded code point.  The check
+  // order is identical to the previous implementation, which decoded the same
+  // input again for every single check.
+  if (OB_FAIL(decode_unicode<CS_TYPE>(input, char_len, unicode))) {
+    ret = OB_UNEXPECT_INTERNAL_ERROR;
+  } else {
+    ret = classify_unicode<CS_TYPE>(unicode, type);
   }
   return ret;
+}
+
+template <ObCharsetType CS_TYPE>
+inline int ObFTCharUtil::classify_unicode(const ob_wc_t unicode, CharType &type)
+{
+  type = CharType::USELESS;
+
+  if (ObUnicodeBlockUtils::is_alpha(unicode)) {
+    type = CharType::ENGLISH_LETTER;
+  } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
+    type = CharType::ARABIC_LETTER;
+  } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
+    type = CharType::CHINESE;
+  } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
+    type = CharType::OTHER_CJK;
+  } else if (is_surrogate_high_unicode<CS_TYPE>(unicode)) {
+    type = CharType::SURROGATE_HIGH;
+  } else if (is_surrogate_low_unicode<CS_TYPE>(unicode)) {
+    type = CharType::SURROGATE_LOW;
+  }
+
+  return OB_SUCCESS;
+}
+
+template <ObCharsetType CS_TYPE>
+inline typename std::enable_if<(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+ObFTCharUtil::is_surrogate_high_unicode(const ob_wc_t unicode)
+{
+  return ObUnicodeBlockUtils::check_high_surrogate(unicode);
+}
+
+template <ObCharsetType CS_TYPE>
+inline typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+ObFTCharUtil::is_surrogate_high_unicode(const ob_wc_t unicode)
+{
+  return false;
+}
+
+template <ObCharsetType CS_TYPE>
+inline typename std::enable_if<(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+ObFTCharUtil::is_surrogate_low_unicode(const ob_wc_t unicode)
+{
+  return ObUnicodeBlockUtils::check_low_surrogate(unicode);
+}
+
+template <ObCharsetType CS_TYPE>
+inline typename std::enable_if<!(CS_TYPE == CHARSET_UTF16 || CS_TYPE == CHARSET_UTF16LE), bool>::type
+ObFTCharUtil::is_surrogate_low_unicode(const ob_wc_t unicode)
+{
+  return false;
 }
 
 inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,

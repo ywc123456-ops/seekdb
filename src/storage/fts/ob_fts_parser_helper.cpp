@@ -36,6 +36,177 @@ namespace oceanbase
 namespace storage
 {
 
+namespace
+{
+/**
+ * Thread local cache of the parsed fulltext parser context.
+ *
+ * ObFTParseHelper::init() parses the parser name and the parser properties
+ * (a JSON document) on every call, although the result only depends on the
+ * two input strings.  The cache keeps the parsed result of the most recently
+ * used (parser name, parser properties) pairs per thread, so that the hot
+ * tokenize path does not have to rebuild and re-parse the JSON document again
+ * and again.
+ *
+ * The cached context only references immutable data:
+ *  - ObFTParserName owns a copy of the parser name,
+ *  - the parser descriptor is a process wide constant,
+ *  - ObFTParserProperty only holds plain values and string literals.
+ */
+class ObFTParserContextCache final
+{
+public:
+  static constexpr int64_t MAX_ENTRY_CNT = 4;
+  static constexpr int64_t MAX_PROPERTIES_LENGTH = 1024;
+
+  struct ParserContext
+  {
+    ObFTParser parser_;
+    ObFTParserProperty property_;
+    const ObIFTParserDesc *parser_desc_;
+    ObAddWordFlag add_word_flag_;
+
+    ParserContext() : parser_(), property_(), parser_desc_(nullptr), add_word_flag_() {}
+  };
+
+  struct Entry
+  {
+    char parser_name_[OB_FT_PARSER_NAME_LENGTH];
+    char parser_properties_[MAX_PROPERTIES_LENGTH];
+    int64_t parser_name_len_;
+    int64_t parser_properties_len_;
+    int64_t hit_cnt_;
+    ParserContext context_;
+
+    Entry()
+      : parser_name_len_(0),
+        parser_properties_len_(0),
+        hit_cnt_(0),
+        context_()
+    {
+      parser_name_[0] = '\0';
+      parser_properties_[0] = '\0';
+    }
+  };
+
+  static ObFTParserContextCache &instance()
+  {
+    static thread_local ObFTParserContextCache cache;
+    return cache;
+  }
+
+  int get(const common::ObString &parser_name,
+          const common::ObString &parser_properties,
+          ObFTParser &parser,
+          ObFTParserProperty &property,
+          const ObIFTParserDesc *&parser_desc,
+          ObAddWordFlag &add_word_flag)
+  {
+    int ret = OB_SUCCESS;
+    int64_t idx = find(parser_name, parser_properties);
+    if (OB_LIKELY(idx >= 0)) {
+      entries_[idx].hit_cnt_++;
+      fill(entries_[idx].context_, parser, property, parser_desc, add_word_flag);
+    } else {
+      ParserContext context;
+      if (OB_FAIL(build(parser_name, parser_properties, context))) {
+      } else if (OB_FAIL(store(parser_name, parser_properties, context))) {
+      } else {
+        fill(context, parser, property, parser_desc, add_word_flag);
+      }
+    }
+    return ret;
+  }
+
+private:
+  static void fill(const ParserContext &context,
+                   ObFTParser &parser,
+                   ObFTParserProperty &property,
+                   const ObIFTParserDesc *&parser_desc,
+                   ObAddWordFlag &add_word_flag)
+  {
+    parser = context.parser_;
+    property = context.property_;
+    parser_desc = context.parser_desc_;
+    add_word_flag = context.add_word_flag_;
+  }
+
+  int64_t find(const common::ObString &parser_name, const common::ObString &parser_properties) const
+  {
+    for (int64_t i = 0; i < entry_cnt_; ++i) {
+      const Entry &entry = entries_[i];
+      if (entry.parser_name_len_ == parser_name.length()
+          && entry.parser_properties_len_ == parser_properties.length()
+          && 0 == MEMCMP(entry.parser_name_, parser_name.ptr(), parser_name.length())
+          && (parser_properties.empty()
+              || 0 == MEMCMP(entry.parser_properties_, parser_properties.ptr(), parser_properties.length()))) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  int build(const common::ObString &parser_name,
+            const common::ObString &parser_properties,
+            ParserContext &context)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_FAIL(context.parser_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
+    } else if (OB_FAIL(context.property_.parse_for_parser_helper(context.parser_, parser_properties))) {
+    } else if (OB_FAIL(context.parser_.get_desc(context.parser_desc_))) {
+    } else if (OB_ISNULL(context.parser_desc_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(context.parser_desc_->get_add_word_flag(context.add_word_flag_))) {
+    } else {
+      // ok
+    }
+    return ret;
+  }
+
+  int store(const common::ObString &parser_name,
+            const common::ObString &parser_properties,
+            const ParserContext &context)
+  {
+    int ret = OB_SUCCESS;
+    if (OB_UNLIKELY(parser_name.length() >= OB_FT_PARSER_NAME_LENGTH
+                    || parser_properties.length() >= MAX_PROPERTIES_LENGTH)) {
+      // too long to cache, keep the caller's result
+      return OB_SUCCESS;
+    }
+    int64_t idx = entry_cnt_;
+    if (entry_cnt_ < MAX_ENTRY_CNT) {
+      entry_cnt_++;
+    } else {
+      // evict the least recently used entry
+      idx = 0;
+      for (int64_t i = 1; i < entry_cnt_; ++i) {
+        if (entries_[i].hit_cnt_ < entries_[idx].hit_cnt_) {
+          idx = i;
+        }
+      }
+    }
+    Entry &entry = entries_[idx];
+    if (!parser_name.empty()) {
+      MEMCPY(entry.parser_name_, parser_name.ptr(), parser_name.length());
+    }
+    entry.parser_name_[parser_name.length()] = '\0';
+    entry.parser_name_len_ = parser_name.length();
+    if (!parser_properties.empty()) {
+      MEMCPY(entry.parser_properties_, parser_properties.ptr(), parser_properties.length());
+    }
+    entry.parser_properties_[parser_properties.length()] = '\0';
+    entry.parser_properties_len_ = parser_properties.length();
+    entry.hit_cnt_ = 0;
+    entry.context_ = context;
+    return ret;
+  }
+
+private:
+  Entry entries_[MAX_ENTRY_CNT];
+  int64_t entry_cnt_ = 0;
+};
+} // namespace
+
 const char *ObFTParser::NAME_STR[ObFTParser::ParserType::FTP_MAX] = {
 #define FT_PARSER_TYPE(ftp_type, parser_name) #parser_name,
   FTS_BUILD_IN_PARSER_LIST
@@ -334,12 +505,12 @@ int ObFTParseHelper::init(
     ret = OB_INIT_TWICE;
   } else if (OB_ISNULL(allocator) || OB_UNLIKELY(parser_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(parser_name_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
-  } else if (OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
-  } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
-  } else if (OB_ISNULL(parser_desc_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
+  } else if (OB_FAIL(ObFTParserContextCache::instance().get(parser_name,
+                                                           parser_properties,
+                                                           parser_name_,
+                                                           parser_property_,
+                                                           parser_desc_,
+                                                           add_word_flag_))) {
   } else {
     allocator_ = allocator;
     is_inited_ = true;

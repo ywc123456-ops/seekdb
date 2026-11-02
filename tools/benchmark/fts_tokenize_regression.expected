@@ -1,0 +1,250 @@
+========================================
+FTS Tokenize / Match Regression Dump
+========================================
+label: golden
+database: fts_large_bench
+rows:     2000
+----------------------------------------
+--- tokenize parser=ik case=1 ---
+[]
+--- tokenize parser=ik case=2 ---
+[]
+--- tokenize parser=ik case=3 ---
+[]
+--- tokenize parser=ik case=4 ---
+["中"]
+--- tokenize parser=ik case=5 ---
+["技术", "一款", "是", "在", "显著", "场景", "下", "的", "全文索引", "开销", "内存", "分词器", "cpu", "数据结构", "热", "非常", "索引", "化", "池", "大量", "停", "实例", "等", "oceanbase", "可以", "单", "稳定", "复用", "数据库", "和", "包括", "查询", "优化", "路径", "用词", "降低", "文档", "全局", "解析器", "例"]
+--- tokenize parser=ik case=6 ---
+["dog.", "quick", "search", "brown", "jumps", "efficient", "path.", "requires", "fox", "hot", "indexing", "the", "over", "tokenization", "lazy", "full-text", "on"]
+--- tokenize parser=ik case=7 ---
+["oceanbase", "稳定", "tokenizer", "database", "全文索引"]
+--- tokenize parser=ik case=8 ---
+["lazy", "over", "quick", "dog", "brown", "fox", "jumps", "the"]
+--- tokenize parser=ik case=9 ---
+["2026-10-31", "user", "12345", "tag", "3.14159", "1,000,000", "100"]
+--- tokenize parser=ik case=10 ---
+["emoji", "world", "hello", "test"]
+--- tokenize parser=ik case=11 ---
+["하", "녕", "こ", "안", "국", "한", "世界", "に", "세", "ん", "어", "요", "語", "ち", "日本", "は"]
+--- tokenize parser=ik case=12 ---
+[]
+--- tokenize parser=ik case=13 ---
+["where", "who", "is", "a", "will", "in", "to", "it", "of", "and", "with", "when", "what", "the"]
+--- tokenize parser=ik case=14 ---
+["index", "database", "search"]
+--- tokenize parser=ik case=15 ---
+["def", "abc", "jkl", "ghi"]
+--- tokenize parser=ik case=16 ---
+["分词器", "tokenizer", "全文索引", "benchmark"]
+--- tokenize parser=ik case=17 ---
+["oceanbase", "数据库"]
+--- tokenize parser=ik case=18 ---
+["中英文", "123", "mixed", "test", "测试"]
+--- tokenize parser=ik case=19 ---
+["可", "非常", "包括", "复", "器", "定", "常", "降", "oceanbase", "销", "路", "是", "cpu", "款", "非", "据", "化", "包", "优化", "实例", "解", "查", "括", "单", "的", "技", "复用", "术", "热", "全局", "显", "场", "开销", "显著", "以", "结", "查询", "全文索引", "存", "一款", "稳", "技术", "全", "引", "和", "低", "下", "数据库", "大量", "分", "索", "降低", "文", "局", "数据结构", "停", "优", "例", "实", "可以", "构", "池", "景", "场景", "在", "库", "用词", "稳定", "文档", "径", "内", "开", "内存", "解析器", "大", "询", "用", "档", "数", "一", "分词器", "索引", "路径", "量", "著", "析", "等", "词"]
+--- tokenize parser=beng case=1 ---
+[]
+--- tokenize parser=beng case=2 ---
+[]
+--- tokenize parser=beng case=3 ---
+[]
+--- tokenize parser=beng case=4 ---
+["中"]
+--- tokenize parser=beng case=5 ---
+["cpu", "开销。"]
+--- tokenize parser=beng case=6 ---
+["text", "quick", "search", "brown", "jumps", "efficient", "requires", "fox", "path", "dog", "full", "hot", "indexing", "over", "tokenization", "lazy"]
+--- tokenize parser=beng case=7 ---
+["oceanbase", "稳定", "tokenizer", "database", "全文索引"]
+--- tokenize parser=beng case=8 ---
+["lazy", "over", "quick", "dog", "brown", "fox", "jumps"]
+--- tokenize parser=beng case=9 ---
+["user", "12345", "tag", "14159", "2026", "100", "000"]
+--- tokenize parser=beng case=10 ---
+["emoji", "world", "hello", "🚀", "test"]
+--- tokenize parser=beng case=11 ---
+["こんにちは", "한국어", "世界", "日本語", "안녕하세요"]
+--- tokenize parser=beng case=12 ---
+[]
+--- tokenize parser=beng case=13 ---
+["and"]
+--- tokenize parser=beng case=14 ---
+["index", "database", "search"]
+--- tokenize parser=beng case=15 ---
+["def", "abc", "jkl", "ghi"]
+--- tokenize parser=beng case=16 ---
+["分词器", "tokenizer", "全文索引", "benchmark"]
+--- tokenize parser=beng case=17 ---
+["oceanbase数据库oceanbase数据库oceanbase数据库"]
+--- tokenize parser=beng case=18 ---
+["中英文", "123", "mixed", "test", "测试"]
+--- tokenize parser=beng case=19 ---
+["cpu", "开销。"]
+--- tokenize parser=space case=1 ---
+[]
+--- tokenize parser=space case=2 ---
+[]
+--- tokenize parser=space case=3 ---
+[]
+--- tokenize parser=space case=4 ---
+[]
+--- tokenize parser=space case=5 ---
+["停用词全局单例", "内存池化数据结构等技术", "在大量文档索引和查询场景下可以显著降低", "cpu", "全文索引的分词器热路径优化包括解析器实例复用", "oceanbase是一款非常稳定的数据库"]
+--- tokenize parser=space case=6 ---
+["text", "quick", "search", "brown", "jumps", "efficient", "requires", "fox", "path", "dog", "full", "hot", "indexing", "over", "tokenization", "lazy"]
+--- tokenize parser=space case=7 ---
+["oceanbase", "tokenizer", "database", "全文索引"]
+--- tokenize parser=space case=8 ---
+["lazy", "over", "quick", "dog", "brown", "fox", "jumps"]
+--- tokenize parser=space case=9 ---
+["user", "12345", "tag", "14159", "2026", "100", "000"]
+--- tokenize parser=space case=10 ---
+["emoji", "world", "hello", "test"]
+--- tokenize parser=space case=11 ---
+["こんにちは", "한국어", "日本語", "안녕하세요"]
+--- tokenize parser=space case=12 ---
+[]
+--- tokenize parser=space case=13 ---
+["and"]
+--- tokenize parser=space case=14 ---
+["index", "database", "search"]
+--- tokenize parser=space case=15 ---
+["def", "abc", "jkl", "ghi"]
+--- tokenize parser=space case=16 ---
+["分词器", "tokenizer", "全文索引", "benchmark"]
+--- tokenize parser=space case=17 ---
+["oceanbase数据库oceanbase数据库oceanbase数据库"]
+--- tokenize parser=space case=18 ---
+["中英文", "123", "mixed", "test"]
+--- tokenize parser=space case=19 ---
+["oceanbase是一款非常稳定的数据库", "cpu", "内存池化数据结构等技术", "停用词全局单例", "全文索引的分词器热路径优化包括解析器实例复用", "在大量文档索引和查询场景下可以显著降低"]
+--- tokenize parser=ngram case=1 ---
+[]
+--- tokenize parser=ngram case=2 ---
+[]
+--- tokenize parser=ngram case=3 ---
+[]
+--- tokenize parser=ngram case=4 ---
+[]
+--- tokenize parser=ngram case=5 ---
+["例复", "停用", "文索", "技术", "一款", "数据", "显著", "场景", "器热", "下可", "化数", "据库", "档索", "径优", "分词", "开销", "以显", "量文", "内存", "的数", "as", "全文", "局单", "引和", "是一", "ce", "器实", "非常", "pu", "单例", "索引", "解析", "款非", "热路", "和查", "定的", "引的", "著降", "结构", "nb", "大量", "oc", "询场", "实例", "的分", "cp", "构等", "存池", "可以", "e是", "稳定", "等技", "复用", "包括", "据结", "查询", "析器", "池化", "化包", "优化", "路径", "景下", "在大", "ba", "se", "用词", "降低", "括解", "ea", "常稳", "文档", "全局", "词全", "词器", "an"]
+--- tokenize parser=ngram case=6 ---
+["iz", "th", "ng", "ke", "ff", "se", "ow", "ck", "es", "ov", "fo", "ef", "pa", "fu", "qu", "ie", "ve", "ll", "at", "ul", "in", "um", "ic", "ti", "ir", "og", "ro", "ox", "br", "xt", "en", "ch", "za", "do", "xi", "ar", "la", "nd", "ea", "mp", "ni", "ci", "az", "er", "ju", "de", "ok", "nt", "ot", "ex", "re", "fi", "he", "ui", "rc", "to", "io", "ps", "wn", "te", "ho", "eq", "zy", "on"]
+--- tokenize parser=ngram case=7 ---
+["ab", "ke", "ea", "oc", "ce", "at", "ni", "索引", "se", "da", "ta", "稳定", "ba", "to", "er", "文索", "全文", "ze", "ok", "nb", "an", "en", "as", "iz"]
+--- tokenize parser=ngram case=8 ---
+["th", "ox", "fo", "ju", "he", "ov", "ow", "ck", "ve", "ps", "wn", "ic", "zy", "er", "mp", "og", "br", "ui", "la", "um", "az", "ro", "qu", "do"]
+--- tokenize parser=ngram case=9 ---
+["ag", "41", "20", "se", "12", "ta", "45", "us", "23", "34", "er", "00", "26", "14", "10", "02", "15", "59", "31"]
+--- tokenize parser=ngram case=10 ---
+["st", "lo", "em", "mo", "he", "ll", "or", "oj", "rl", "es", "te", "wo", "ld", "ji", "el"]
+--- tokenize parser=ngram case=11 ---
+["にち", "녕하", "하세", "세요", "世界", "こん", "ちは", "안녕", "한국", "日本", "국어", "本語", "んに"]
+--- tokenize parser=ngram case=12 ---
+[]
+--- tokenize parser=ngram case=13 ---
+["ho", "wh", "th", "wi", "is", "he", "at", "re", "in", "ll", "nd", "il", "to", "er", "it", "of", "an", "en", "ha"]
+--- tokenize parser=ngram case=14 ---
+["ab", "ea", "at", "in", "se", "nd", "da", "ba", "ta", "ar", "ex", "ch", "de", "rc", "as"]
+--- tokenize parser=ngram case=15 ---
+["ab", "hi", "ef", "gh", "de", "kl", "jk", "bc"]
+--- tokenize parser=ngram case=16 ---
+["ke", "ma", "词器", "ni", "索引", "to", "ar", "ch", "er", "rk", "文索", "全文", "分词", "ze", "be", "ok", "hm", "en", "iz", "nc"]
+--- tokenize parser=ngram case=17 ---
+["ea", "数据", "e数", "oc", "ce", "se", "ba", "据库", "nb", "an", "库o", "as"]
+--- tokenize parser=ngram case=18 ---
+["st", "中英", "ed", "12", "xe", "23", "es", "te", "mi", "ix", "测试", "英文"]
+--- tokenize parser=ngram case=19 ---
+["非常", "括解", "包括", "ea", "的分", "著降", "的数", "器热", "等技", "数据", "优化", "实例", "据结", "pu", "以显", "引和", "ce", "解析", "cp", "池化", "复用", "和查", "款非", "全局", "档索", "引的", "开销", "据库", "显著", "景下", "下可", "oc", "构等", "例复", "查询", "定的", "存池", "常稳", "一款", "化包", "技术", "询场", "单例", "an", "文索", "是一", "as", "大量", "降低", "全文", "词全", "停用", "结构", "器实", "可以", "场景", "e是", "分词", "用词", "在大", "稳定", "径优", "文档", "量文", "局单", "se", "内存", "ba", "热路", "索引", "词器", "化数", "路径", "nb", "析器"]
+--- tokenize parser=ngram2 case=1 ---
+[]
+--- tokenize parser=ngram2 case=2 ---
+[]
+--- tokenize parser=ngram2 case=3 ---
+[]
+--- tokenize parser=ngram2 case=4 ---
+[]
+--- tokenize parser=ngram2 case=5 ---
+["例复", "停用", "文索", "技术", "器热路", "一款", "量文档", "全局单", "数据", "anb", "显著", "的数据", "引和查", "显著降", "索引和", "实例复", "稳定的", "场景", "器热", "下可", "化数", "析器实", "局单例", "据库", "据结构", "档索", "常稳定", "径优", "档索引", "款非常", "分词", "开销", "以显", "定的数", "量文", "景下可", "内存", "热路径", "ase", "下可以", "包括解", "的数", "as", "可以显", "等技术", "和查询", "括解析", "分词器", "全文", "词全局", "bas", "路径优", "化数据", "局单", "引和", "用词全", "是一", "ce", "例复用", "器实", "cpu", "非常", "cea", "pu", "单例", "索引", "的分词", "解析", "款非", "池化数", "器实例", "在大量", "热路", "和查", "定的", "oce", "数据结", "nba", "全文索", "引的", "索引的", "著降", "场景下", "以显著", "结构", "nb", "大量", "著降低", "停用词", "oc", "询场", "结构等", "一款非", "大量文", "实例", "的分", "cp", "se是", "文索引", "构等", "存池", "词器热", "径优化", "询场景", "查询场", "文档索", "可以", "e是", "稳定", "等技", "复用", "数据库", "e是一", "包括", "化包括", "据结", "查询", "是一款", "析器", "池化", "化包", "优化", "路径", "景下", "在大", "存池化", "ba", "se", "用词", "优化包", "降低", "括解", "ea", "构等技", "常稳", "文档", "非常稳", "内存池", "引的分", "全局", "词全", "解析器", "词器", "an", "ean"]
+--- tokenize parser=ngram2 case=6 ---
+["tex", "iz", "req", "th", "ffi", "ng", "rch", "ke", "mps", "ff", "se", "ump", "ow", "ck", "es", "ov", "fo", "ef", "ath", "pa", "fu", "ull", "ove", "qu", "res", "ire", "jum", "ie", "ve", "dex", "ll", "ind", "at", "ext", "ul", "in", "cie", "azy", "equ", "um", "uic", "ic", "ti", "ent", "ir", "og", "laz", "own", "ro", "ox", "br", "xt", "en", "fic", "ken", "ch", "za", "do", "ici", "xi", "ar", "niz", "ick", "la", "fox", "nd", "dog", "ea", "mp", "ni", "ci", "az", "er", "ju", "de", "ing", "ien", "ok", "nt", "nde", "exi", "ot", "sea", "qui", "ati", "arc", "bro", "ear", "zat", "ex", "re", "fi", "eni", "row", "he", "ui", "hot", "rc", "xin", "to", "tio", "iza", "eff", "io", "the", "uir", "ps", "ion", "oke", "tok", "ver", "wn", "pat", "te", "ho", "eq", "ful", "zy", "on"]
+--- tokenize parser=ngram2 case=7 ---
+["ab", "ke", "tok", "bas", "ea", "ean", "oc", "oke", "ce", "at", "ase", "ni", "索引", "se", "oce", "da", "ta", "稳定", "ba", "to", "er", "全文索", "nba", "文索", "全文", "eni", "ze", "ata", "aba", "zer", "ize", "ok", "nb", "tab", "an", "dat", "en", "cea", "as", "iz", "文索引", "ken", "niz", "anb"]
+--- tokenize parser=ngram2 case=8 ---
+["th", "qui", "ox", "fo", "ver", "ump", "ju", "he", "ov", "row", "ow", "ck", "ve", "jum", "bro", "laz", "ps", "azy", "wn", "ic", "zy", "er", "mp", "dog", "own", "og", "mps", "br", "ick", "ove", "fox", "ui", "la", "um", "az", "ro", "qu", "uic", "do", "the"]
+--- tokenize parser=ngram2 case=9 ---
+["415", "ag", "41", "123", "tag", "234", "20", "use", "se", "12", "202", "ta", "45", "us", "23", "34", "er", "159", "026", "ser", "00", "26", "14", "10", "141", "02", "15", "345", "100", "000", "59", "31"]
+--- tokenize parser=ngram2 case=10 ---
+["hel", "st", "rld", "lo", "em", "orl", "mo", "he", "ell", "ll", "or", "est", "oj", "rl", "es", "llo", "tes", "te", "wo", "ld", "moj", "oji", "emo", "ji", "wor", "el"]
+--- tokenize parser=ngram2 case=11 ---
+["안녕하", "하세요", "こんに", "にちは", "にち", "녕하", "んにち", "한국어", "하세", "세요", "世界", "こん", "日本語", "ちは", "안녕", "녕하세", "한국", "日本", "국어", "本語", "んに"]
+--- tokenize parser=ngram2 case=12 ---
+[]
+--- tokenize parser=ngram2 case=13 ---
+["ho", "wh", "th", "who", "wha", "ith", "wi", "is", "he", "her", "at", "re", "hat", "ill", "in", "ll", "nd", "ere", "il", "to", "er", "it", "of", "and", "an", "en", "whe", "hen", "wil", "wit", "ha", "the"]
+--- tokenize parser=ngram2 case=14 ---
+["ab", "ea", "bas", "ase", "at", "in", "se", "dex", "nd", "arc", "ind", "da", "ba", "ta", "ar", "ex", "ch", "de", "nde", "ata", "aba", "rch", "tab", "dat", "sea", "rc", "as", "ear"]
+--- tokenize parser=ngram2 case=15 ---
+["ab", "hi", "ef", "gh", "de", "def", "kl", "abc", "jk", "jkl", "bc", "ghi"]
+--- tokenize parser=ngram2 case=16 ---
+["ke", "tok", "ma", "hma", "enc", "oke", "词器", "mar", "ni", "索引", "分词器", "to", "ar", "ch", "er", "全文索", "rk", "ark", "文索", "全文", "nch", "eni", "分词", "ze", "be", "zer", "ize", "ok", "hm", "en", "chm", "ben", "iz", "文索引", "nc", "ken", "niz"]
+--- tokenize parser=ngram2 case=17 ---
+["bas", "ea", "数据", "e数", "ean", "oc", "ce", "ase", "库oc", "e数据", "se", "oce", "ba", "se数", "据库o", "nba", "据库", "数据库", "nb", "an", "库o", "cea", "as", "anb"]
+--- tokenize parser=ngram2 case=18 ---
+["st", "中英文", "123", "中英", "ed", "12", "xe", "23", "est", "xed", "es", "tes", "te", "mi", "mix", "ix", "测试", "ixe", "英文"]
+--- tokenize parser=ngram2 case=19 ---
+["e是一", "全局单", "析器实", "文索引", "档索引", "非常", "括解", "等技术", "包括", "ase", "引和查", "查询场", "ea", "优化包", "的分", "著降", "的数", "cpu", "器热", "等技", "化数据", "数据", "询场景", "词器热", "在大量", "优化", "非常稳", "用词全", "实例", "据结", "场景下", "pu", "存池化", "著降低", "径优化", "以显", "引和", "池化数", "ce", "解析", "索引的", "cp", "括解析", "是一款", "池化", "引的分", "复用", "款非常", "和查", "款非", "热路径", "包括解", "全局", "量文档", "档索", "引的", "常稳定", "开销", "据库", "数据结", "显著", "景下", "下可", "oc", "bas", "构等", "构等技", "词全局", "例复", "结构等", "查询", "内存池", "定的", "anb", "存池", "索引和", "cea", "定的数", "常稳", "以显著", "一款", "化包", "技术", "oce", "的分词", "ean", "询场", "单例", "据结构", "an", "nba", "文索", "是一", "数据库", "as", "大量", "文档索", "的数据", "器热路", "降低", "显著降", "全文", "词全", "路径优", "器实例", "停用", "结构", "下可以", "器实", "和查询", "可以", "场景", "一款非", "全文索", "e是", "分词", "se是", "用词", "在大", "停用词", "稳定", "径优", "可以显", "文档", "量文", "景下可", "局单", "se", "内存", "解析器", "局单例", "大量文", "ba", "分词器", "热路", "化包括", "索引", "词器", "化数", "路径", "例复用", "稳定的", "nb", "析器", "实例复"]
+--- tokenize NULL input ik ---
+ERROR 1235 (0A000) at line 1: ik with the binary charset is not supported
+--- tokenize ik output=ALL ---
+{"tokens": [{"技术": 1}, {"一款": 1}, {"是": 1}, {"在": 1}, {"显著": 1}, {"场景": 1}, {"下": 1}, {"的": 2}, {"全文索引": 1}, {"开销": 1}, {"内存": 1}, {"分词器": 1}, {"cpu": 1}, {"数据结构": 1}, {"热": 1}, {"非常": 1}, {"索引": 1}, {"化": 1}, {"池": 1}, {"大量": 1}, {"停": 1}, {"实例": 1}, {"等": 1}, {"oceanbase": 1}, {"可以": 1}, {"单": 1}, {"稳定": 1}, {"复用": 1}, {"数据库": 1}, {"和": 1}, {"包括": 1}, {"查询": 1}, {"优化": 1}, {"路径": 1}, {"用词": 1}, {"降低": 1}, {"文档": 1}, {"全局": 1}, {"解析器": 1}, {"例": 1}], "doc_len": 41}
+--- tokenize ik output=DEFAULT ---
+["技术", "一款", "是", "在", "显著", "场景", "下", "的", "全文索引", "开销", "内存", "分词器", "cpu", "数据结构", "热", "非常", "索引", "化", "池", "大量", "停", "实例", "等", "oceanbase", "可以", "单", "稳定", "复用", "数据库", "和", "包括", "查询", "优化", "路径", "用词", "降低", "文档", "全局", "解析器", "例"]
+--- tokenize ik additional_args ik_mode=MAX_WORD ---
+["停用", "技术", "一款", "是", "数据", "在", "显著", "场景", "下", "的", "款", "全文索引", "器", "库", "分词", "开销", "内存", "分词器", "全文", "cpu", "一", "数据结构", "热", "非常", "索引", "解析", "化", "池", "结构", "大量", "实例", "等", "oceanbase", "可以", "单", "稳定", "复用", "数据库", "和", "包括", "查询", "优化", "路径", "用词", "降低", "文档", "全局", "解析器", "例"]
+--- tokenize ik additional_args ik_mode=SMART ---
+["技术", "一款", "是", "在", "显著", "场景", "下", "的", "全文索引", "开销", "内存", "分词器", "cpu", "数据结构", "热", "非常", "索引", "化", "池", "大量", "停", "实例", "等", "oceanbase", "可以", "单", "稳定", "复用", "数据库", "和", "包括", "查询", "优化", "路径", "用词", "降低", "文档", "全局", "解析器", "例"]
+--- tokenize beng additional_args min_token_size=5 ---
+["quick", "search", "brown", "jumps", "efficient", "requires", "indexing", "tokenization"]
+--- tokenize beng additional_args max_token_size=10 ---
+["text", "quick", "search", "brown", "jumps", "efficient", "requires", "fox", "path", "dog", "full", "hot", "indexing", "over", "lazy"]
+--- tokenize ngram additional_args ngram_token_size=4 ---
+["的数据库", "词器热路", "eanb", "径优化包", "量文档索", "全文索引", "档索引和", "化数据结", "文索引的", "分词器热", "查询场景", "以显著降", "用词全局", "和查询场", "se是一", "anba", "下可以显", "析器实例", "器实例复", "稳定的数", "数据结构", "nbas", "热路径优", "据结构等", "结构等技", "常稳定的", "显著降低", "e是一款", "优化包括", "池化数据", "引的分词", "是一款非", "base", "款非常稳", "包括解析", "索引和查", "ase是", "实例复用", "在大量文", "停用词全", "索引的分", "非常稳定", "词全局单", "文档索引", "引和查询", "一款非常", "可以显著", "路径优化", "的分词器", "括解析器", "化包括解", "构等技术", "存池化数", "景下可以", "定的数据", "ocea", "大量文档", "全局单例", "cean", "内存池化", "场景下可", "器热路径", "解析器实", "询场景下"]
+--- tokenize unknown parser ---
+ERROR 1128 (HY000) at line 1: Function not_a_parser is not defined
+--- tokenize invalid properties json ---
+ERROR 3141 (22032) at line 1: Invalid JSON text in argument.
+--- tokenize unsupported config ---
+ERROR 1210 (HY000) at line 1: Incorrect arguments to config: unknown_config
+--- match setup ---
+2000
+--- match cn ---
+801
+--- match beng ---
+1100
+--- match mixed ---
+732
+--- match limit ---
+20
+--- match single word ---
+400
+--- match upper case ---
+400
+--- match ngram ---
+1750
+--- match no hit ---
+0
+--- match empty against ---
+0
+--- match stopwords only ---
+ERROR 1191 (HY000) at line 1: Can't find FULLTEXT index matching the column list
+--- match sample rows ---
+2
+4
+8
+9
+10
+----------------------------------------
+end of regression dump
+========================================
