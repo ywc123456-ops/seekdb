@@ -68,6 +68,11 @@ class TokenizeCache
 public:
   static constexpr int64_t SHARD_NUM = 16;
   static constexpr int64_t SLOT_NUM = 4;
+  // Upper bound for the size of a cached tokenize result.  The cache is
+  // bounded by the number of slots but not by the number of bytes, so a huge
+  // result would be kept alive once per slot.  Bigger results are recomputed
+  // on every call instead of being cached.
+  static constexpr int64_t MAX_CACHED_RESULT_LENGTH = 256 * 1024;
 
 private:
   // One cached result.  The key is the concatenation of the text, the parser
@@ -90,6 +95,9 @@ private:
       char *value_buf = nullptr;
       alloc_.reset();
       valid_ = false;
+      if (result.length() > MAX_CACHED_RESULT_LENGTH) {
+        return false;
+      }
       if (OB_ISNULL(key_buf = static_cast<char *>(alloc_.alloc(key_len)))) {
         return false;
       }
