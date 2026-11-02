@@ -19,6 +19,7 @@
 #define USING_LOG_PREFIX STORAGE_FTS
 
 #include "storage/fts/ob_fts_parser_helper.h"
+#include <cinttypes>
 
 #include "common/json_type/ob_json_tree.h"
 #include "share/ob_force_print_log.h"
@@ -30,6 +31,9 @@
 #include "data_plane/fts/ob_fts_parser_property.h"
 #include "storage/fts/ob_fts_stop_word.h"
 #include "storage/fts/ob_whitespace_ft_parser.h"
+#include "lib/allocator/ob_malloc.h"
+#include "lib/lock/ob_mutex.h"
+#include <atomic>
 
 namespace oceanbase
 {
@@ -205,6 +209,350 @@ private:
   Entry entries_[MAX_ENTRY_CNT];
   int64_t entry_cnt_ = 0;
 };
+
+/**
+ * Collector of the raw token stream of one document.
+ *
+ * The tokens are appended to one buffer as
+ *   [token header][word bytes][token header][word bytes]...
+ * so that the recorded stream can be replayed with a simple walk over the
+ * buffer.  The collector only feeds the segment memo, a failure to collect
+ * never fails the segmentation itself.
+ */
+class ObFTTokenCollector final
+{
+public:
+  struct Token
+  {
+    int32_t word_len_;
+    int32_t char_cnt_;
+    int32_t word_freq_;
+    int32_t reserved_;
+  };
+
+public:
+  ObFTTokenCollector() : buf_(nullptr), cap_(0), len_(0), token_cnt_(0), armed_(false), is_collecting_(true) {}
+  ~ObFTTokenCollector() { destroy(); }
+
+  void arm()
+  {
+    len_ = 0;
+    token_cnt_ = 0;
+    armed_ = true;
+    is_collecting_ = true;
+  }
+
+  void disarm() { armed_ = false; }
+
+  void destroy()
+  {
+    if (nullptr != buf_) {
+      ob_free(buf_);
+      buf_ = nullptr;
+    }
+    cap_ = 0;
+    len_ = 0;
+    token_cnt_ = 0;
+    armed_ = false;
+  }
+
+  int add(const char *word, const int64_t word_len, const int64_t char_cnt, const int64_t word_freq)
+  {
+    int ret = OB_SUCCESS;
+    if (!armed_) {
+      // not collecting
+    } else if (!is_collecting_) {
+      // the collection failed before, keep the segmentation going
+    } else if (OB_ISNULL(word) || word_len <= 0 || char_cnt <= 0 || word_freq <= 0) {
+      // never produced by the tokenizer
+    } else if (OB_FAIL(ensure_capacity(len_ + sizeof(Token) + word_len))) {
+      is_collecting_ = false;
+    } else {
+      Token token;
+      token.word_len_ = static_cast<int32_t>(word_len);
+      token.char_cnt_ = static_cast<int32_t>(char_cnt);
+      token.word_freq_ = static_cast<int32_t>(word_freq);
+      token.reserved_ = 0;
+      MEMCPY(buf_ + len_, &token, sizeof(Token));
+      len_ += sizeof(Token);
+      MEMCPY(buf_ + len_, word, word_len);
+      len_ += word_len;
+      ++token_cnt_;
+    }
+    return ret;
+  }
+
+  bool is_valid() const { return is_collecting_ && token_cnt_ > 0; }
+  int64_t size() const { return len_; }
+  int64_t token_cnt() const { return token_cnt_; }
+  const char *data() const { return buf_; }
+
+private:
+  int ensure_capacity(const int64_t need)
+  {
+    int ret = OB_SUCCESS;
+    if (need > cap_) {
+      int64_t new_cap = (cap_ > 0 ? cap_ * 2 : 1024);
+      while (new_cap < need) {
+        new_cap *= 2;
+      }
+      char *new_buf = static_cast<char *>(ob_malloc(new_cap, common::ObMemAttr("FTSegmentMemo")));
+      if (OB_ISNULL(new_buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        if (nullptr != buf_ && len_ > 0) {
+          MEMCPY(new_buf, buf_, len_);
+        }
+        if (nullptr != buf_) {
+          ob_free(buf_);
+        }
+        buf_ = new_buf;
+        cap_ = new_cap;
+      }
+    }
+    return ret;
+  }
+
+private:
+  char *buf_;
+  int64_t cap_;
+  int64_t len_;
+  int64_t token_cnt_;
+  bool armed_;
+  bool is_collecting_;
+};
+
+// The collector of the thread that is currently segmenting a document.
+thread_local ObFTTokenCollector tl_segment_collector;
+
+/**
+ * Process wide memo of the raw token stream of the fulltext tokenizers.
+ *
+ * A fulltext index is built by two auxiliary tables, the postings table
+ * (`__idx_xxx_fti_ik`) and the doc word table (`__idx_xxx_fti_ik_fts_doc_word`).
+ * Both of them carry the `__word_segment` column and both of them have to
+ * split the very same document text into words, so every document is
+ * segmented twice while the index is built.  The two build tasks run
+ * concurrently, therefore the duplicated work is done twice in parallel and
+ * the build is bound by the tokenizer.
+ *
+ * The memo records the raw token stream of a document (the output of
+ * ObITokenIterator::get_next_token) keyed by the document text, so that the
+ * second - and any later - segmentation of the same text can replay the
+ * recorded tokens instead of running the tokenizer again.
+ *
+ * The recorded tokens are replayed through ObAddWord::process_word(), exactly
+ * like the original loop does, therefore the words, the word counts and the
+ * document length are the same as without the memo.
+ *
+ * The token stream of a document only depends on
+ *   - the document text,
+ *   - the collation type of the column,
+ *   - the parser (descriptor and version) and the parser properties.
+ * The built in dictionaries (main / quantifier / stop word) are process wide
+ * and immutable for the lifetime of the process (see ObFTDictHub), so no
+ * further state has to be part of the key.
+ *
+ * The memo is only used for parsers that copy the word into the allocator of
+ * the caller (the casedown flag), so that the replayed words never point
+ * into the memo buffer.
+ */
+class ObFTSegmentMemo final
+{
+public:
+  static constexpr int64_t SHARD_CNT = 32;
+  static constexpr int64_t SLOT_CNT = 8192;
+  static constexpr int64_t MAX_DOC_LEN = 16 * 1024;
+  static constexpr int64_t MAX_ENTRY_SIZE = 256 * 1024;
+  static constexpr int64_t MAX_TOTAL_SIZE = 64 * 1024 * 1024;
+
+  struct Entry
+  {
+    uint64_t hash1_;
+    uint64_t hash2_;
+    int64_t doc_len_;
+    int64_t token_cnt_;
+    int64_t size_;
+    char *data_;
+  };
+
+  struct Shard
+  {
+    Entry entries_[SLOT_CNT];
+    lib::ObMutex mutex_;
+  };
+
+public:
+  static ObFTSegmentMemo &instance()
+  {
+    static ObFTSegmentMemo memo;
+    return memo;
+  }
+
+  /**
+   * Replay the recorded token stream of the given document.
+   * A corrupted entry is treated as a miss.
+   */
+  int replay(const uint64_t hash1,
+             const uint64_t hash2,
+             const int64_t doc_len,
+             ObAddWord &add_word,
+             bool &is_hit)
+  {
+    int ret = OB_SUCCESS;
+    is_hit = false;
+    Shard &shard = shards_[hash1 % SHARD_CNT];
+    lib::ObMutexGuard guard(shard.mutex_);
+    Entry &entry = shard.entries_[(hash1 / SHARD_CNT) % SLOT_CNT];
+    if (OB_ISNULL(entry.data_)
+        || entry.hash1_ != hash1
+        || entry.hash2_ != hash2
+        || entry.doc_len_ != doc_len) {
+      return OB_SUCCESS;
+    }
+    const char *pos = entry.data_;
+    const char *end = entry.data_ + entry.size_;
+    // validate the recorded stream first, a corrupted entry is treated as a
+    // miss and must not add a part of the words twice
+    bool is_valid = true;
+    for (int64_t i = 0; i < entry.token_cnt_ && is_valid; ++i) {
+      ObFTTokenCollector::Token token;
+      if (pos + sizeof(token) > end) {
+        is_valid = false;
+        break;
+      }
+      MEMCPY(&token, pos, sizeof(token));
+      pos += sizeof(token);
+      if (token.word_len_ <= 0 || token.char_cnt_ <= 0 || token.word_freq_ <= 0
+          || pos + token.word_len_ > end) {
+        is_valid = false;
+        break;
+      }
+      pos += token.word_len_;
+    }
+    if (is_valid && pos != end) {
+      is_valid = false;
+    }
+    if (is_valid) {
+      pos = entry.data_;
+      for (int64_t i = 0; i < entry.token_cnt_ && OB_SUCC(ret); ++i) {
+        ObFTTokenCollector::Token token;
+        MEMCPY(&token, pos, sizeof(token));
+        pos += sizeof(token);
+        if (OB_FAIL(add_word.process_word(pos, token.word_len_, token.char_cnt_, token.word_freq_))) {
+          break;
+        }
+        pos += token.word_len_;
+      }
+      // a failed replay falls back to the tokenizer
+      is_hit = OB_SUCC(ret);
+    }
+    return OB_SUCCESS;
+  }
+
+  /**
+   * Record the token stream of a document.  A failure to record never fails
+   * the caller, the memo is only an optimization.
+   */
+  void store(const uint64_t hash1,
+             const uint64_t hash2,
+             const int64_t doc_len,
+             const int64_t token_cnt,
+             const char *data,
+             const int64_t size)
+  {
+    if (size <= 0 || size > MAX_ENTRY_SIZE || OB_ISNULL(data)) {
+      return;
+    }
+    if (total_size_.load(std::memory_order_relaxed) + size > MAX_TOTAL_SIZE) {
+      // the memo is full
+      return;
+    }
+    char *buf = static_cast<char *>(ob_malloc(size, common::ObMemAttr("FTSegmentMemo")));
+    if (OB_ISNULL(buf)) {
+      return;
+    }
+    MEMCPY(buf, data, size);
+    Shard &shard = shards_[hash1 % SHARD_CNT];
+    lib::ObMutexGuard guard(shard.mutex_);
+    Entry &entry = shard.entries_[(hash1 / SHARD_CNT) % SLOT_CNT];
+    if (nullptr != entry.data_) {
+      total_size_.fetch_sub(entry.size_, std::memory_order_relaxed);
+      ob_free(entry.data_);
+    }
+    entry.hash1_ = hash1;
+    entry.hash2_ = hash2;
+    entry.doc_len_ = doc_len;
+    entry.token_cnt_ = token_cnt;
+    entry.size_ = size;
+    entry.data_ = buf;
+    total_size_.fetch_add(size, std::memory_order_relaxed);
+  }
+
+  static inline uint64_t mix64(uint64_t x)
+  {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+  }
+
+  /**
+   * The key of a document: the text itself plus everything that can change
+   * the tokens produced for it.
+   */
+  static void calc_hash(const char *text,
+                        const int64_t text_len,
+                        const uint64_t ctx_hash,
+                        uint64_t &hash1,
+                        uint64_t &hash2)
+  {
+    uint64_t h1 = 1469598103934665603ULL;
+    uint64_t h2 = 0x9e3779b97f4a7c15ULL;
+    for (int64_t i = 0; i < text_len; ++i) {
+      const uint64_t c = static_cast<uint64_t>(static_cast<unsigned char>(text[i]));
+      h1 = (h1 ^ c) * 1099511628211ULL;
+      h2 = mix64(h2 ^ (c + 0x9e3779b97f4a7c15ULL));
+    }
+    hash1 = mix64(h1 ^ ctx_hash);
+    hash2 = mix64(h2 ^ mix64(ctx_hash + 0x165667b19e3779f9ULL));
+  }
+
+  static uint64_t calc_ctx_hash(const common::ObCollationType type,
+                                const int64_t parser_version,
+                                const void *parser_desc,
+                                const ObFTParserProperty &property)
+  {
+    uint64_t ctx = mix64(static_cast<uint64_t>(type));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(parser_version));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(reinterpret_cast<uintptr_t>(parser_desc)));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(property.min_token_size_));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(property.max_token_size_));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(property.ngram_token_size_));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(property.min_ngram_token_size_));
+    ctx = mix64(ctx ^ static_cast<uint64_t>(property.max_ngram_token_size_));
+    ctx = mix64(ctx ^ (property.ik_mode_smart_ ? 1ULL : 2ULL));
+    ctx = mix64(ctx ^ hash_string(property.stopword_table_));
+    ctx = mix64(ctx ^ hash_string(property.dict_table_));
+    ctx = mix64(ctx ^ hash_string(property.quantifier_table_));
+    return ctx;
+  }
+
+  static uint64_t hash_string(const common::ObString &str)
+  {
+    uint64_t h = 1469598103934665603ULL;
+    for (int64_t i = 0; i < str.length(); ++i) {
+      h = (h ^ static_cast<uint64_t>(static_cast<unsigned char>(str.ptr()[i]))) * 1099511628211ULL;
+    }
+    return mix64(h);
+  }
+
+private:
+  Shard shards_[SHARD_CNT];
+  std::atomic<int64_t> total_size_{0};
+};
 } // namespace
 
 const char *ObFTParser::NAME_STR[ObFTParser::ParserType::FTP_MAX] = {
@@ -277,7 +625,8 @@ int ObFTParser::serialize_to_str(char *buf, const int64_t buf_len)
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_UNLIKELY(!is_valid())) {
     ret = OB_NOT_SUPPORTED;
-  } else if (OB_FAIL(common::databuff_printf(buf, buf_len, pos, "%.*s.%ld", parser_name_.len(), parser_name_.str(),
+  } else if (OB_FAIL(common::databuff_printf(buf, buf_len, pos, "%.*s.%" PRId64,
+          static_cast<int>(parser_name_.len()), parser_name_.str(),
           parser_version_))) {
   }
   return ret;
@@ -466,6 +815,10 @@ int ObFTParseHelper::segment(
           if (OB_ITER_END != ret) {
           }
         } else if (OB_FAIL(add_word.process_word(word, word_len, char_cnt, word_freq))) {
+        } else {
+          // record the token for the segment memo, the word is copied before
+          // the iterator reuses its buffer
+          tl_segment_collector.add(word, word_len, char_cnt, word_freq);
         }
       }
       if (OB_ITER_END == ret) {
@@ -550,15 +903,60 @@ int ObFTParseHelper::segment(
   } else {
     words.reuse();
     ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
-    if (OB_FAIL(segment(
-                    parser_property_,
-                    parser_name_.get_parser_version(),
-                    parser_desc_,
-                    cs,
-                    fulltext,
-                    fulltext_len,
-                    *allocator_,
-                    add_word))) {
+    // The segment memo is only used for the parsers that copy the word into
+    // the allocator of the caller (the casedown flag), so that a replayed
+    // word never points into the memo buffer.
+    ObFTSegmentMemo &memo = ObFTSegmentMemo::instance();
+    uint64_t hash1 = 0;
+    uint64_t hash2 = 0;
+    const bool memo_enabled = add_word_flag_.casedown()
+                               && fulltext_len > 0
+                               && fulltext_len <= ObFTSegmentMemo::MAX_DOC_LEN;
+    bool is_hit = false;
+    if (memo_enabled) {
+      const uint64_t ctx_hash = ObFTSegmentMemo::calc_ctx_hash(
+          type,
+          parser_name_.get_parser_version(),
+          parser_desc_,
+          parser_property_);
+      ObFTSegmentMemo::calc_hash(fulltext, fulltext_len, ctx_hash, hash1, hash2);
+      if (OB_SUCC(memo.replay(hash1, hash2, fulltext_len, add_word, is_hit)) && is_hit) {
+        doc_length = add_word.get_add_word_count();
+      } else {
+        // miss, segment the document and record the tokens
+        words.reuse();
+        tl_segment_collector.arm();
+        ret = segment(
+                parser_property_,
+                parser_name_.get_parser_version(),
+                parser_desc_,
+                cs,
+                fulltext,
+                fulltext_len,
+                *allocator_,
+                add_word);
+        tl_segment_collector.disarm();
+        if (OB_SUCC(ret)) {
+          if (tl_segment_collector.is_valid()) {
+            memo.store(hash1,
+                       hash2,
+                       fulltext_len,
+                       tl_segment_collector.token_cnt(),
+                       tl_segment_collector.data(),
+                       tl_segment_collector.size());
+          }
+          doc_length = add_word.get_add_word_count();
+        }
+      }
+    } else if (OB_FAIL(segment(
+                           parser_property_,
+                           parser_name_.get_parser_version(),
+                           parser_desc_,
+                           cs,
+                           fulltext,
+                           fulltext_len,
+                           *allocator_,
+                           add_word))) {
     } else {
       doc_length = add_word.get_add_word_count();
     }
