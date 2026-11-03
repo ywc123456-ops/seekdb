@@ -1313,6 +1313,17 @@ int ObServer::start()
     } else {
       FLOG_INFO("server runtime is ready");
     }
+    // Build the fulltext dictionaries during the startup so that the first
+    // fulltext index build does not have to pay for them.  A failure is not
+    // fatal, the parsers fall back to building a dictionary on demand.
+    if (OB_SUCC(ret)) {
+      int tmp_ret = ObFTParseData::preload_shared_dicts();
+      if (OB_SUCCESS != tmp_ret) {
+        LOG_WARN("failed to preload the shared fulltext dictionaries", KR(tmp_ret));
+      } else {
+        LOG_INFO("preloaded the shared fulltext dictionaries");
+      }
+    }
     if (FAILEDx(local_management_service_.start_runtime_dependent_services())) {
       LOG_ERROR("fail to start runtime dependent local services", KR(ret));
     } else {
