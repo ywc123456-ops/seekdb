@@ -793,36 +793,6 @@ int ObFTParseData::get_dict_hub(ObFTDictHub *&hub)
   return ret;
 }
 
-int ObFTParseData::preload_shared_dicts()
-{
-  int ret = OB_SUCCESS;
-  ObIFTDict *dict = nullptr;
-  ObFTDictHub *hub = nullptr;
-  // The name only shows up in the log, the shared dictionaries are keyed by the
-  // dictionary type.  The charset and the collation have to match the ones the
-  // IK parser asks for, otherwise the built ranges are not reusable.
-  ObFTDictDesc main_dict_desc("main_dict",
-                              ObFTDictType::DICT_IK_MAIN,
-                              ObCharsetType::CHARSET_UTF8MB4,
-                              ObCollationType::CS_TYPE_UTF8MB4_BIN);
-  ObFTDictDesc quan_dict_desc("quan_dict",
-                              ObFTDictType::DICT_IK_QUAN,
-                              ObCharsetType::CHARSET_UTF8MB4,
-                              ObCollationType::CS_TYPE_UTF8MB4_BIN);
-  ObFTDictDesc stopword_dict_desc("stopword",
-                                  ObFTDictType::DICT_IK_STOP,
-                                  ObCharsetType::CHARSET_UTF8MB4,
-                                  ObCollationType::CS_TYPE_UTF8MB4_BIN);
-  if (OB_ISNULL(g_ftparse_data)) {
-    ret = OB_NOT_INIT;
-  } else if (OB_FAIL(g_ftparse_data->get_dict_hub(hub))) {
-  } else if (OB_FAIL(hub->get_shared_dict(main_dict_desc, dict))) {
-  } else if (OB_FAIL(hub->get_shared_dict(quan_dict_desc, dict))) {
-  } else if (OB_FAIL(hub->get_shared_dict(stopword_dict_desc, dict))) {
-  }
-  return ret;
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 // ObFTParseHelper
 int ObFTParseHelper::segment(

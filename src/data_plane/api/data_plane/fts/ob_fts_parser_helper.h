@@ -113,13 +113,6 @@ public:
   static void deinit_global();
   static ObFTParseData &instance();
 
-  // Builds the process wide IK dictionaries ahead of the first fulltext index
-  // build.  Building them costs about half a second of CPU and it is otherwise
-  // paid by the first parser that runs, which is always the first fulltext
-  // index build of the measured workload.  A failure here is not fatal: the
-  // parsers build their own dictionary lazily when the preload did not happen.
-  static int preload_shared_dicts();
-
   int init();
   void destroy();
 
