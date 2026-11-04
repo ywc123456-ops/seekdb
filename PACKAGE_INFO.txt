@@ -2,96 +2,10 @@ OceanBase 2026 - seekdb full-text search performance package
 
 Repository: https://github.com/ycLiao10/seekdb-2026.git
 Branch:     2026-competition-fts17
-Base:       2026-competition @ 5bce9e06d1281347ad61344e4b01fab9158c58a2
 Commit:     the tip commit of branch 2026-competition-fts17 in this repository
-Title:      Reduce FTS build serialization and redundant English parsing
+Commit message: Reduce FTS build serialization and redundant English parsing
+Snapshot date: 2026-11-02 (UTC)
 
-Contents
---------
-seekdb source with the full-text search (FTS) performance optimization applied
-on top of the official 2026-competition baseline, together with new FTS unit
-tests and the validation documents of this optimization line.
+This archive is a complete tracked-source snapshot at the exact commit above. It includes seekdb source, FTS benchmark scripts and baseline files, tests, and TASK4_FTS17_VALIDATION.md. It does not include .git history or submodule working-tree contents.
 
-The official benchmark inputs, SQL, timing logic, scoring script and baseline
-JSON (tools/benchmark/fts_large_bench*) are taken from the 2026-competition
-baseline and are unchanged byte-for-byte. No GitHub workflow, no build
-configuration and no official benchmark file was added, removed or modified.
-
-Scope of the change (48 modified files, 22 added files, 0 deleted files)
-------------------------------------------------------------------------
-  * Mini-mode FTS build: the two auxiliary build jobs run concurrently
-    (each with 4 PX workers, replacing one job with 8 workers). Non-mini
-    worker counts, explicit higher parallelism, DDL states, snapshot waits,
-    checksums and resource admission are unchanged.
-  * Routine parameter live/history metadata writes are batched inside the
-    existing transaction, bounded by 64 rows or 64 KiB. Parameter IDs, schema
-    versions, escaping, history-only handling and affected-row validation are
-    preserved. No package loading is skipped or moved outside the benchmark.
-  * Pure-ASCII BENG splitting and lowercase normalization are fused for
-    utf8mb4_bin / general_ci / unicode_ci, with a direct reference oracle
-    verifying byte classification, output order, long tokens, embedded NUL,
-    buffer reuse and token lifetime.
-  * The IK arbitrator map uses a single-owner node allocator; keys, hash,
-    ordering and arbitration decisions are unchanged.
-
-No file was deleted: the source packaging step dropped a handful of dot-files
-and CI workflow definitions, and those files are kept here exactly as they
-are in the 2026-competition baseline.
-
-How to read the bundled validation documents
---------------------------------------------
-The documents under docs/competition/ and the TASK4_FTS1*_VALIDATION.md files
-are the work log of the whole optimization line, one file per iteration. They
-are kept verbatim. Each corresponds to a different candidate, so they must not
-be read as measurements of the code delivered on this branch:
-
-  * task4-benchmark-report.txt / task4-benchmark-score.txt
-        Produced by an EARLIER candidate (git_head 938e19f, 2026-10-29). The
-        "score: 100.00 / 100" in the score file is a local reference computed
-        from that run, not an official score and not a measurement of this
-        branch.
-  * task4-followup-validation.md
-        The round that produced fts8 (official 1.11/50).
-  * task4-fts10 / fts11 / fts12-validation.md
-        The rounds leading to fts12.
-  * task4-fulltext-optimization.md, task4-delivery-check.md
-        Design notes and the delivery record of an earlier round. The
-        delivery-check file describes a delivery to a different repository
-        and branch and is a dated historical record (2026-10-30); the
-        delivery delivered here is this branch of ycLiao10/seekdb-2026.
-  * TASK4_FTS16_VALIDATION.md
-        The fts16 candidate (official 21.289/50).
-  * TASK4_FTS17_VALIDATION.md
-        THE candidate delivered on this branch. Read this one for the
-        bottleneck analysis, the change list and the measurements.
-
-Validation status of the delivered candidate (fts17)
-----------------------------------------------------
-  * Complete Release build succeeds; 19 native FTS unit tests pass.
-  * Four complete default benchmarks in ABBA order plus SQL differential
-    tests produced identical 75,041-byte correctness transcripts.
-  * All official query hit counts match exactly: 8001 / 11000 / 7332 / 20.
-  * Eight concurrent clients: 4,800 TOKENIZE calls per binary, identical
-    outputs across clients and versions.
-  * Build-side metrics reproduce a consistent local reduction (conservative
-    comparison of the slowest candidate against the fastest baseline:
-    build_ik_all -31.36%, build_ik_content -31.43%, build_beng_en -38.72%).
-  * The tokenizer and query end-to-end measurements remain noisy and do NOT
-    establish that all nine wall-time metrics improve (measured mean
-    reductions: tokenize_ik -10.25%, query_cn -0.29%, query_beng -1.01%,
-    query_mixed -1.80%, query_limit +4.41%).
-
-  This candidate must not be represented as a verified all-metric
-  improvement, as a verified improvement over the official best score of
-  36.549/50 (fts12 @ f949146be7cab774a78bfa9ce1a709b047f3bff5), or as a
-  guaranteed 50-point result. It has no official score yet; the official
-  score must be established by the official evaluation of this branch.
-
-Source provenance
------------------
-The optimization content delivered on this branch was developed on the fts17
-line of work (upstream fork xkr66607/oceanbase-2026-seekdb, branch fts17,
-commit 398ec81a0a76601dc87b8d374a2bd68c4efc7384) and is delivered here
-rebased onto the official 2026-competition baseline. The upstream README
-contributor marker (OB-P) was removed, since it identified a different
-author's pull request.
+Validation note: the best recorded official score remains fts12 @ f949146be7cab774a78bfa9ce1a709b047f3bff5 (36.549/50). fts17 is a local candidate with 19 native tests and local correctness/performance evidence, but it has no official score. Its own report explicitly says tokenizer/query end-to-end gains are noisy and do not prove all nine timing metrics improve.
