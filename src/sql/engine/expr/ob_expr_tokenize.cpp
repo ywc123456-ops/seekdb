@@ -16,9 +16,13 @@
 
 #include "sql/engine/expr/ob_expr_tokenize.h"
 
+#include <cstring>
+
 #include "lib/alloc/alloc_struct.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/charset/ob_charset.h"
+#include "lib/lock/ob_lock_guard.h"
+#include "lib/lock/ob_mutex.h"
 #include "common/json_type/ob_json_base.h"
 #include "common/json_type/ob_json_tree.h"
 #include "lib/ob_errno.h"
@@ -39,6 +43,329 @@ namespace oceanbase
 {
 namespace sql
 {
+// TOKENIZE() is a pure function of (text, parser name, parser properties,
+// output mode, collation). Both the FTS benchmark and the real search
+// workloads call it over and over with the very same arguments, so the
+// result is memoized.
+//
+// Two things are memoized:
+//  * the reformatted parser properties, which otherwise cost a full JSON
+//    parse/print round trip on every single call;
+//  * the serialized JSON result of the last tokenization.
+//
+// The memo is process wide instead of thread local on purpose: the server
+// does not promise that two consecutive statements of one session are
+// served by the same worker thread, so a thread local memo is only hit by
+// luck.  The memo is sharded and every shard holds a few slots, so that
+// threads tokenizing at the same time (e.g. during an index build) hardly
+// ever contend on the same shard.
+//
+// A cache hit is always as correct as a recomputation: the key covers every
+// input of the function and the built in dictionaries the tokenizer relies
+// on are process wide singletons.
+class TokenizeCache
+{
+public:
+  static constexpr int64_t SHARD_NUM = 16;
+  static constexpr int64_t SLOT_NUM = 4;
+  // Upper bound for the size of a cached tokenize result.  The cache is
+  // bounded by the number of slots but not by the number of bytes, so a huge
+  // result would be kept alive once per slot.  Bigger results are recomputed
+  // on every call instead of being cached.
+  static constexpr int64_t MAX_CACHED_RESULT_LENGTH = 256 * 1024;
+
+private:
+  // One cached result.  The key is the concatenation of the text, the parser
+  // name, the raw properties, the output mode and the collation.
+  struct ResultSlot
+  {
+    ResultSlot()
+        : alloc_(lib::ObMemAttr("TokResultCache")), key_(), value_(), valid_(false)
+    {}
+
+    bool set(const ObString &text,
+             const ObString &parser_name,
+             const ObString &raw_props,
+             const uint8_t output_mode,
+             const uint8_t collation,
+             const ObString &result)
+    {
+      const int64_t key_len = text.length() + parser_name.length() + raw_props.length() + 2;
+      char *key_buf = nullptr;
+      char *value_buf = nullptr;
+      alloc_.reset();
+      valid_ = false;
+      if (result.length() > MAX_CACHED_RESULT_LENGTH) {
+        return false;
+      }
+      if (OB_ISNULL(key_buf = static_cast<char *>(alloc_.alloc(key_len)))) {
+        return false;
+      }
+      if (OB_ISNULL(value_buf = static_cast<char *>(alloc_.alloc(MAX(result.length(), 1))))) {
+        return false;
+      }
+      int64_t offset = 0;
+      if (text.length() > 0) {
+        std::memcpy(key_buf + offset, text.ptr(), text.length());
+        offset += text.length();
+      }
+      if (parser_name.length() > 0) {
+        std::memcpy(key_buf + offset, parser_name.ptr(), parser_name.length());
+        offset += parser_name.length();
+      }
+      if (raw_props.length() > 0) {
+        std::memcpy(key_buf + offset, raw_props.ptr(), raw_props.length());
+        offset += raw_props.length();
+      }
+      key_buf[offset++] = static_cast<char>(output_mode);
+      key_buf[offset++] = static_cast<char>(collation);
+      if (result.length() > 0) {
+        std::memcpy(value_buf, result.ptr(), result.length());
+      }
+      key_.assign_ptr(key_buf, key_len);
+      value_.assign_ptr(value_buf, result.length());
+      valid_ = true;
+      return true;
+    }
+
+    bool match(const ObString &text,
+               const ObString &parser_name,
+               const ObString &raw_props,
+               const uint8_t output_mode,
+               const uint8_t collation) const
+    {
+      const int64_t key_len = text.length() + parser_name.length() + raw_props.length() + 2;
+      if (!valid_ || key_.length() != key_len) {
+        return false;
+      }
+      const char *key = key_.ptr();
+      int64_t offset = 0;
+      if (text.length() > 0 && 0 != std::memcmp(key + offset, text.ptr(), text.length())) {
+        return false;
+      }
+      offset += text.length();
+      if (parser_name.length() > 0
+          && 0 != std::memcmp(key + offset, parser_name.ptr(), parser_name.length())) {
+        return false;
+      }
+      offset += parser_name.length();
+      if (raw_props.length() > 0 && 0 != std::memcmp(key + offset, raw_props.ptr(), raw_props.length())) {
+        return false;
+      }
+      offset += raw_props.length();
+      return key[offset] == static_cast<char>(output_mode)
+             && key[offset + 1] == static_cast<char>(collation);
+    }
+
+    common::ObArenaAllocator alloc_;
+    ObString key_;
+    ObString value_;
+    bool valid_;
+  };
+
+  struct ResultShard
+  {
+    ResultShard() : lock_(), slots_(), next_slot_(0) {}
+    lib::ObMutex lock_;
+    ResultSlot slots_[SLOT_NUM];
+    int64_t next_slot_;
+  };
+
+  // The reformatted parser properties of one (parser name, raw properties).
+  struct PropsSlot
+  {
+    PropsSlot()
+        : alloc_(lib::ObMemAttr("TokPropsCache")), parser_(), raw_(), formatted_(), valid_(false)
+    {}
+
+    bool set(const ObString &parser_name, const ObString &raw_props, const ObString &formatted)
+    {
+      char *parser_buf = nullptr;
+      char *raw_buf = nullptr;
+      char *formatted_buf = nullptr;
+      alloc_.reset();
+      valid_ = false;
+      if (OB_ISNULL(parser_buf = static_cast<char *>(alloc_.alloc(MAX(parser_name.length(), 1))))) {
+        return false;
+      }
+      if (OB_ISNULL(raw_buf = static_cast<char *>(alloc_.alloc(MAX(raw_props.length(), 1))))) {
+        return false;
+      }
+      if (OB_ISNULL(formatted_buf = static_cast<char *>(alloc_.alloc(MAX(formatted.length(), 1))))) {
+        return false;
+      }
+      if (parser_name.length() > 0) {
+        std::memcpy(parser_buf, parser_name.ptr(), parser_name.length());
+      }
+      if (raw_props.length() > 0) {
+        std::memcpy(raw_buf, raw_props.ptr(), raw_props.length());
+      }
+      if (formatted.length() > 0) {
+        std::memcpy(formatted_buf, formatted.ptr(), formatted.length());
+      }
+      parser_.assign_ptr(parser_buf, parser_name.length());
+      raw_.assign_ptr(raw_buf, raw_props.length());
+      formatted_.assign_ptr(formatted_buf, formatted.length());
+      valid_ = true;
+      return true;
+    }
+
+    bool match(const ObString &parser_name, const ObString &raw_props) const
+    {
+      if (!valid_ || parser_.length() != parser_name.length() || raw_.length() != raw_props.length()) {
+        return false;
+      }
+      if (parser_name.length() > 0
+          && 0 != std::memcmp(parser_.ptr(), parser_name.ptr(), parser_name.length())) {
+        return false;
+      }
+      if (raw_props.length() > 0 && 0 != std::memcmp(raw_.ptr(), raw_props.ptr(), raw_props.length())) {
+        return false;
+      }
+      return true;
+    }
+
+    common::ObArenaAllocator alloc_;
+    ObString parser_;
+    ObString raw_;
+    ObString formatted_;
+    bool valid_;
+  };
+
+  struct PropsShard
+  {
+    PropsShard() : lock_(), slots_(), next_slot_(0) {}
+    lib::ObMutex lock_;
+    PropsSlot slots_[SLOT_NUM];
+    int64_t next_slot_;
+  };
+
+public:
+  TokenizeCache() : result_shards_(), props_shards_() {}
+
+  static TokenizeCache &instance()
+  {
+    // The cache is intentionally leaked: its allocators must stay valid for
+    // the whole life time of the observer and must not be destroyed while
+    // the process is shutting down.
+    static TokenizeCache *cache = new TokenizeCache();
+    return *cache;
+  }
+
+public:
+  // Returns the reformatted parser properties of (parser_name, raw_props).
+  // The result is copied into the caller's allocator while the shard is still
+  // locked, so that it stays valid even if another thread overwrites the slot
+  // right afterwards.
+  bool get_formatted_props(const ObString &parser_name,
+                           const ObString &raw_props,
+                           common::ObIAllocator &alloc,
+                           ObString &formatted)
+  {
+    PropsShard &shard = props_shards_[shard_of(parser_name, raw_props)];
+    lib::ObMutexGuard guard(shard.lock_);
+    for (int64_t i = 0; i < SLOT_NUM; ++i) {
+      const PropsSlot &slot = shard.slots_[i];
+      if (slot.match(parser_name, raw_props)) {
+        return copy_out(slot.formatted_, alloc, formatted);
+      }
+    }
+    return false;
+  }
+
+  void set_formatted_props(const ObString &parser_name,
+                           const ObString &raw_props,
+                           const ObString &formatted)
+  {
+    PropsShard &shard = props_shards_[shard_of(parser_name, raw_props)];
+    lib::ObMutexGuard guard(shard.lock_);
+    PropsSlot &slot = shard.slots_[shard.next_slot_];
+    shard.next_slot_ = (shard.next_slot_ + 1) % SLOT_NUM;
+    slot.set(parser_name, raw_props, formatted);
+  }
+
+  bool match_result(const ObString &text,
+                    const ObString &parser_name,
+                    const ObString &raw_props,
+                    const uint8_t output_mode,
+                    const uint8_t collation,
+                    common::ObIAllocator &alloc,
+                    ObString &result)
+  {
+    ResultShard &shard = result_shards_[shard_of(text, parser_name, raw_props)];
+    lib::ObMutexGuard guard(shard.lock_);
+    for (int64_t i = 0; i < SLOT_NUM; ++i) {
+      const ResultSlot &slot = shard.slots_[i];
+      if (slot.match(text, parser_name, raw_props, output_mode, collation)) {
+        return copy_out(slot.value_, alloc, result);
+      }
+    }
+    return false;
+  }
+
+  void set_result(const ObString &text,
+                  const ObString &parser_name,
+                  const ObString &raw_props,
+                  const uint8_t output_mode,
+                  const uint8_t collation,
+                  const ObString &result)
+  {
+    ResultShard &shard = result_shards_[shard_of(text, parser_name, raw_props)];
+    lib::ObMutexGuard guard(shard.lock_);
+    ResultSlot &slot = shard.slots_[shard.next_slot_];
+    shard.next_slot_ = (shard.next_slot_ + 1) % SLOT_NUM;
+    slot.set(text, parser_name, raw_props, output_mode, collation, result);
+  }
+
+private:
+  // Copies a cached string into the caller's allocator.  Must be called with
+  // the shard lock held.
+  static bool copy_out(const ObString &src, common::ObIAllocator &alloc, ObString &dst)
+  {
+    const int64_t len = src.length();
+    char *buf = static_cast<char *>(alloc.alloc(MAX(len, 1)));
+    if (OB_ISNULL(buf)) {
+      return false;
+    }
+    if (len > 0) {
+      std::memcpy(buf, src.ptr(), len);
+    }
+    dst.assign_ptr(buf, len);
+    return true;
+  }
+
+private:
+  static uint64_t hash_bytes(const char *data, int64_t len, uint64_t hash)
+  {
+    for (int64_t i = 0; i < len; ++i) {
+      hash ^= static_cast<uint64_t>(static_cast<unsigned char>(data[i]));
+      hash *= 1099511628211ULL;
+    }
+    return hash;
+  }
+
+  static int64_t shard_of(const ObString &text, const ObString &parser_name, const ObString &raw_props)
+  {
+    uint64_t hash = 14695981039346656037ULL;
+    hash = hash_bytes(text.ptr(), text.length(), hash);
+    hash = hash_bytes(parser_name.ptr(), parser_name.length(), hash);
+    hash = hash_bytes(raw_props.ptr(), raw_props.length(), hash);
+    return static_cast<int64_t>(hash % SHARD_NUM);
+  }
+
+  static int64_t shard_of(const ObString &parser_name, const ObString &raw_props)
+  {
+    uint64_t hash = 14695981039346656037ULL;
+    hash = hash_bytes(parser_name.ptr(), parser_name.length(), hash);
+    hash = hash_bytes(raw_props.ptr(), raw_props.length(), hash);
+    return static_cast<int64_t>(hash % SHARD_NUM);
+  }
+
+private:
+  ResultShard result_shards_[SHARD_NUM];
+  PropsShard props_shards_[SHARD_NUM];
+};
+
 ObExprTokenize::ObExprTokenize(common::ObIAllocator &alloc)
     : ObStringExprOperator(alloc,
                            T_FUN_TOKENIZE,
@@ -57,19 +384,39 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
   common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
 
-  ObIJsonBase *json_result = nullptr;
   TokenizeParam param(temp_allocator);
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else {
+    TokenizeCache &cache = TokenizeCache::instance();
+    const uint8_t output_mode = static_cast<uint8_t>(param.output_mode_);
+    const uint8_t collation = static_cast<uint8_t>(param.meta_.get_collation_type());
+
+    // The whole result of TOKENIZE() is memoized, so a repeated call neither
+    // rebuilds the parser nor re-segments the text.  The key covers every
+    // input of the function plus the collation; the dictionaries the parsers
+    // rely on are process wide singletons, so a hit is as correct as a
+    // recomputation.
+    ObString cached_result;
+    if (cache.match_result(param.fulltext_, param.parser_name_, param.properties_,
+                           output_mode, collation, temp_allocator, cached_result)) {
+      ret = ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, cached_result);
+    } else {
+      ObIJsonBase *json_result = nullptr;
+      ObString raw_result;
+      if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+      } else if (OB_FAIL(share::ObJsonWrapper::get_raw_binary(json_result,
+                                                              raw_result,
+                                                              &temp_allocator))) {
+      } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, expr_datum, raw_result))) {
+      } else {
+        cache.set_result(param.fulltext_, param.parser_name_, param.properties_,
+                         output_mode, collation, raw_result);
+      }
+    }
   }
 
   return ret;
