@@ -32,7 +32,8 @@ int ObTextTaaTIter::init(const ObTextTaaTParam &param)
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(mem_context_, mem_param))) {
   } else if (OB_FAIL(ObSRTaaTIterImpl::init(*param.base_param_, *param.dim_iter_, *param.allocator_))) {
-  } else if (OB_FAIL(bm25_param_estimator_.init(param.bm25_param_est_ctx_))) {
+  } else if (nullptr != param.base_param_->relevance_expr_
+             && OB_FAIL(bm25_param_estimator_.init(param.bm25_param_est_ctx_))) {
   } else {
     query_tokens_ = param.query_tokens_;
     mode_flag_ = param.mode_flag_;
@@ -63,7 +64,7 @@ void ObTextTaaTIter::reuse(const bool switch_tablet)
 int ObTextTaaTIter::pre_process()
 {
   int ret = OB_SUCCESS;
-  if (iter_param_->need_project_relevance()) {
+  if (nullptr != iter_param_->relevance_expr_) {
     const bool is_first_estimation = !bm25_param_estimator_.is_estimated();
     if (!is_first_estimation) {
       // skip
@@ -72,6 +73,10 @@ int ObTextTaaTIter::pre_process()
       const int64_t total_doc_cnt = bm25_param_estimator_.get_total_doc_cnt();
       partition_cnt_ = MIN((total_doc_cnt-1) / OB_HASHMAP_DEFAULT_SIZE + 1, OB_MAX_HASHMAP_COUNT);
     }
+  } else {
+    // No corpus estimate is needed for membership-only retrieval. The row
+    // store still spills and bounds memory when there are many query terms.
+    partition_cnt_ = 1;
   }
   return ret;
 }

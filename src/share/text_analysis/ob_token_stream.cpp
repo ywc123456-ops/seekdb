@@ -98,7 +98,9 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = (1 == cs_->mbminlen
+          && static_cast<unsigned char>(doc[trav_pos_]) < 0x80)
+          ? 1 : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +114,9 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = (1 == cs_->mbminlen
+          && static_cast<unsigned char>(doc[trav_pos_]) < 0x80)
+          ? 1 : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
@@ -207,14 +211,16 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
   int ret = OB_SUCCESS;
   const int64_t token_len = check_token.len_;
   const char *token = check_token.ptr_;
-  int64_t special_mark_cnt = 0;
+  is_valid = false;
   for (int64_t i = 0; i < token_len; ++i) {
     const char *character = token + i;
-    if (ob_ispunct(cs_, *character) || ob_iscntrl(cs_, *character)) {
-      special_mark_cnt++;
+    if (!ob_ispunct(cs_, *character) && !ob_iscntrl(cs_, *character)) {
+      // One ordinary byte is sufficient to retain the token. Keep the
+      // existing charset predicates, including their handling of high bytes.
+      is_valid = true;
+      break;
     }
   }
-  is_valid = !(special_mark_cnt == token_len);
   return ret;
 }
 
@@ -295,7 +301,17 @@ int ObBasicEnglishNormalizer::get_next(ObDatum &next_token, int64_t &token_freq)
     } else {
       ObString norm_alnum_token(norm_token_len, norm_token_ptr);
       ObString norm_lower_token;
-      if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
+      bool unchanged = CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(
+          static_cast<ObCollationType>(cs_->number));
+      for (uint32_t i = 0; unchanged && i < norm_token_len; ++i) {
+        const unsigned char c = static_cast<unsigned char>(norm_token_ptr[i]);
+        unchanged = c < 0x80 && !(c >= 'A' && c <= 'Z');
+      }
+      if (unchanged) {
+        // The input document is immutable and lives through token consumption.
+        // Avoid allocating and lowercasing a UTF-8 token that is already ASCII lowercase.
+        next_token.set_string(norm_alnum_token);
+      } else if (OB_FAIL(ObCharset::tolower(cs_, norm_alnum_token, norm_lower_token, norm_allocator_))) {
       } else {
         next_token.set_string(norm_lower_token);
       }

@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX STORAGE_FTS
+#include "lib/ob_running_mode.h"
 #include "ob_fts_index_builder_util.h"
 #include "ob_index_builder_util.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
@@ -1047,7 +1048,12 @@ int ObFtsIndexBuilderUtil::decide_parallelism(
       case share::schema::ObIndexType::INDEX_TYPE_DOC_ID_ROWKEY_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_INDEX_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_FTS_DOC_WORD_LOCAL:
-        decided_parallelism = MAX(original_parallelism / 3, 1L);
+        // The FTS index build is scan/tokenize/sort bound.  The default DDL
+        // parallelism is 1, which leaves almost all cores idle; use the cores
+        // that are available instead of artificially serializing the build.
+        // The mini-mode builder runs at most two auxiliary jobs together;
+        // split the previous eight-worker budget between those jobs.
+        decided_parallelism = MAX(original_parallelism, lib::is_mini_mode() ? 4L : 8L);
         break;
       case share::schema::ObIndexType::INDEX_TYPE_NORMAL_MULTIVALUE_LOCAL:
       case share::schema::ObIndexType::INDEX_TYPE_UNIQUE_MULTIVALUE_LOCAL:

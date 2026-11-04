@@ -28,6 +28,8 @@
 #include "storage/fts/dict/ob_ft_dict_def.h"
 #include "storage/fts/dict/ob_ft_dict_iterator.h"
 
+#include <cstdint>
+
 namespace oceanbase
 {
 namespace storage
@@ -50,6 +52,10 @@ public:
     ObFTSingleWord start_;
     ObFTSingleWord end_;
     ObIFTDict *dict_; // a cache dict
+    // Decoded first code points of start_/end_; used to locate a range without
+    // two collation-aware string comparisons per input character.
+    uint32_t start_cp_;
+    uint32_t end_cp_;
   };
 
 public:
@@ -98,6 +104,7 @@ private:
   }
 
   int find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const;
+  static int first_codepoint(const ObString &word, uint32_t &cp);
 
 private:
   static constexpr int DEFAULT_KEY_PER_RANGE = 50000; // by estimated

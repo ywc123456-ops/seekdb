@@ -51,7 +51,12 @@ private:
   ObObjMeta meta_;
 };
 
-typedef common::hash::ObHashMap<ObFTWord, int64_t> ObFTWordMap;
+// The map is owned by one parser invocation; concurrent access never happens.
+using WordMapNode = common::hash::HashMapTypes<ObFTWord, int64_t>::AllocType;
+using WordMapAllocator = common::hash::SimpleAllocer<WordMapNode,
+    common::hash::NodeNumTraits<WordMapNode>::NODE_NUM, common::hash::NoPthreadDefendMode>;
+typedef common::hash::ObHashMap<ObFTWord, int64_t, common::hash::NoPthreadDefendMode,
+    common::hash::hash_func<ObFTWord>, common::hash::equal_to<ObFTWord>, WordMapAllocator> ObFTWordMap;
 
 class ObAddWordFlag final
 {

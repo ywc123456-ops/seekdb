@@ -19,6 +19,7 @@
 
 #include "share/rc/ob_server_runtime.h"
 #include "storage/fts/ob_fts_stop_word.h"
+#include "lib/charset/ob_charset_string_helper.h"
 #include "storage/fts/ob_fts_parser_helper.h"
 #include "storage/fts/ob_fts_parser_property.h"
 
@@ -76,33 +77,41 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
   int ret = OB_SUCCESS;
   
   
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
+    const common::ObString &src_str = word.get_word().get_string();
+    ObFTWord converted;
+    if (common::ObCharset::charset_type_by_coll(word.get_collation_type())
+        == common::ObCharset::charset_type_by_coll(stopword_type_.get_collation_type())) {
+      // Same character set: only the collation tag differs, the bytes are identical.
+      // Reuse the input buffer instead of converting and copying on every token.
+      converted = ObFTWord(src_str.length(), src_str.ptr(), stopword_type_);
+      ret = stopword_set_.exist_refactored(converted);
+    } else {
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      common::ObString cmp_str;
+      if (OB_FAIL(common::ObCharset::charset_convert(
                                        allocator,
-                                       word.get_word().get_string(),
+                                       src_str,
                                        word.get_collation_type(),
                                        stopword_type_.get_collation_type(),
                                        cmp_str))) {
-    } else {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
-      ret = stopword_set_.exist_refactored(converted);
-      if (OB_HASH_NOT_EXIST == ret) {
-        is_stopword = false;
-        ret = OB_SUCCESS;
-      } else if (OB_HASH_EXIST == ret) {
-        is_stopword = true;
-        ret = OB_SUCCESS;
-      } else if (OB_SUCC(ret)) {
-        ret = OB_ERR_UNEXPECTED;
       } else {
+        converted = ObFTWord(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+        ret = stopword_set_.exist_refactored(converted);
       }
+    }
+    if (OB_HASH_NOT_EXIST == ret) {
+      is_stopword = false;
+      ret = OB_SUCCESS;
+    } else if (OB_HASH_EXIST == ret) {
+      is_stopword = true;
+      ret = OB_SUCCESS;
+    } else if (OB_SUCC(ret)) {
+      ret = OB_ERR_UNEXPECTED;
     }
   }
   return ret;
@@ -158,11 +167,56 @@ bool ObAddWord::is_min_max_word(const int64_t c_len) const
   return flag_.min_max_word() && (c_len < min_token_size_ || c_len > max_token_size_);
 }
 
+
+namespace
+{
+// Code points in these blocks have no lowercase mapping, so casedn is identity.
+inline bool ob_ft_is_caseless_codepoint(const uint32_t cp)
+{
+  return (cp >= 0x3000 && cp <= 0x303F)     // CJK punctuation
+      || (cp >= 0x3040 && cp <= 0x30FF)     // Hiragana / Katakana
+      || (cp >= 0x3400 && cp <= 0x4DBF)     // CJK extension A
+      || (cp >= 0x4E00 && cp <= 0x9FFF)     // CJK unified ideographs
+      || (cp >= 0xAC00 && cp <= 0xD7A3)     // Hangul syllables
+      || (cp >= 0xF900 && cp <= 0xFAFF)     // CJK compatibility ideographs
+      || (cp >= 0x20000 && cp <= 0x2FA1F);  // CJK extensions B-F and supplement
+}
+
+inline bool ob_ft_is_caseless_word(const common::ObString &word)
+{
+  const unsigned char *p = reinterpret_cast<const unsigned char *>(word.ptr());
+  int64_t remain = word.length();
+  while (remain > 0) {
+    ob_wc_t cp = 0;
+    const int64_t char_len = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(
+        p, p + remain, cp);
+    if (char_len <= 0) {
+      return false;
+    }
+    if (cp >= 'A' && cp <= 'Z') {
+      return false;
+    }
+    if (cp >= 0x80 && !ob_ft_is_caseless_codepoint(cp)) {
+      return false;
+    }
+    p += char_len;
+    remain -= char_len;
+  }
+  return true;
+}
+} // namespace
+
 int ObAddWord::casedown_word(const ObFTWord &src, ObFTWord &dst)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(src.empty())) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (flag_.casedown()
+             && CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(src.get_collation_type())
+             && ob_ft_is_caseless_word(src.get_word().get_string())) {
+    // CJK, digits and punctuation have no case mapping.  Taking this path also
+    // avoids a per-token allocation and copy in ObCharset::tolower.
+    dst = src;
   } else if (flag_.casedown()) {
     ObString dst_str;
     if (OB_FAIL(ObCharset::tolower(
@@ -198,20 +252,22 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
-  int64_t word_count = 0;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
   } else {
+    auto increment = [&word, word_freq](hash::HashMapPair<ObFTWord, int64_t> &entry) {
+      // set_refactored(overwrite) also replaces the key representation. This
+      // matters when distinct byte strings compare equal under the collation.
+      entry.first = word;
+      entry.second += word_freq;
+    };
+    ret = word_map_.atomic_refactored(word, increment);
     if (OB_HASH_NOT_EXIST == ret) {
-      word_count = 1;
-    } else {
-      word_count += word_freq;
-    }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+      // Preserve the existing first-occurrence count.
+      ret = word_map_.set_refactored(word, 1/*word count*/);
     }
   }
   return ret;

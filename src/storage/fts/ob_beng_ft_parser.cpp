@@ -26,6 +26,15 @@ namespace oceanbase
 namespace storage
 {
 
+namespace
+{
+inline bool english_ascii_alnum(const unsigned char c)
+{
+  const unsigned char lower = c | 0x20;
+  return (c >= '0' && c <= '9') || (lower >= 'a' && lower <= 'z');
+}
+}
+
 int ObBEngFTParser::get_next_token(
     const char *&word,
     int64_t &word_len,
@@ -42,6 +51,34 @@ int ObBEngFTParser::get_next_token(
   word_freq = 0;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
+  } else if (ascii_mode_) {
+    // For these UTF-8 collations, ASCII delimiters are exactly the complement
+    // of letters and digits. Fuse tokenization and normalization into one pass.
+    const auto *text = reinterpret_cast<const unsigned char *>(doc_.ptr_);
+    while (ascii_pos_ < doc_.len_ && !english_ascii_alnum(text[ascii_pos_])) ++ascii_pos_;
+    const uint32_t begin = ascii_pos_;
+    bool uppercase = false;
+    while (ascii_pos_ < doc_.len_ && english_ascii_alnum(text[ascii_pos_])) {
+      uppercase |= text[ascii_pos_] >= 'A' && text[ascii_pos_] <= 'Z';
+      ++ascii_pos_;
+    }
+    if (ascii_pos_ == begin) {
+      ret = OB_ITER_END;
+    } else {
+      word_len = char_len = ascii_pos_ - begin;
+      word_freq = 1;
+      if (!uppercase) {
+        word = doc_.ptr_ + begin;
+      } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(word_len)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        for (int64_t i = 0; i < word_len; ++i) {
+          const unsigned char c = text[begin + i];
+          buf[i] = c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
+        }
+        word = buf;
+      }
+    }
   } else if (OB_ISNULL(token_stream_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(token_stream_->get_next(token, token_freq))) {
@@ -49,11 +86,22 @@ int ObBEngFTParser::get_next_token(
     }
   } else if (OB_ISNULL(token.ptr_) || OB_UNLIKELY(0 >= token.len_ || 0 >= token_freq)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(token.len_)))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
   } else {
-    MEMCPY(buf, token.ptr_, token.len_);
-    word = buf;
+    // Unchanged lowercase tokens point into the caller-owned input document.
+    // Only normalizer-owned buffers must be copied before the next token/reset.
+    const uintptr_t input_begin = reinterpret_cast<uintptr_t>(doc_.ptr_);
+    const uintptr_t token_begin = reinterpret_cast<uintptr_t>(token.ptr_);
+    const bool from_document = token_begin >= input_begin
+        && token_begin - input_begin <= doc_.len_
+        && token.len_ <= doc_.len_ - (token_begin - input_begin);
+    if (from_document) {
+      word = token.ptr_;
+    } else if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(token.len_)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(buf, token.ptr_, token.len_);
+      word = buf;
+    }
     word_len = token.len_;
     char_len = token.len_;
     word_freq = token_freq;
@@ -76,7 +124,16 @@ int ObBEngFTParser::init(ObFTParserParam *param)
     analysis_ctx_.cs_ = param->cs_;
     analysis_ctx_.filter_stopword_ = false;
     analysis_ctx_.need_grouping_ = false;
-    if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
+    ascii_pos_ = 0;
+    ascii_mode_ = param->cs_->number == CS_TYPE_UTF8MB4_BIN
+        || param->cs_->number == CS_TYPE_UTF8MB4_GENERAL_CI
+        || param->cs_->number == CS_TYPE_UTF8MB4_UNICODE_CI;
+    for (uint32_t i = 0; ascii_mode_ && i < doc_.len_; ++i) {
+      ascii_mode_ = static_cast<unsigned char>(doc_.ptr_[i]) < 0x80;
+    }
+    if (ascii_mode_) {
+      is_inited_ = true;
+    } else if (OB_FAIL(english_analyzer_.init(analysis_ctx_, *param->allocator_))) {
     } else if (OB_FAIL(segment(doc_, token_stream_))) {
     } else if (OB_ISNULL(token_stream_)) {
       ret = OB_ERR_UNEXPECTED;
@@ -110,6 +167,8 @@ void ObBEngFTParser::reset()
   english_analyzer_.reset();
   doc_.reset();
   token_stream_ = nullptr;
+  ascii_mode_ = false;
+  ascii_pos_ = 0;
   is_inited_ = false;
 }
 

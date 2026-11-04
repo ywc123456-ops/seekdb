@@ -40,9 +40,25 @@ public:
   ObFTSingleWord(const ObFTSingleWord &other) = default;
   ObFTSingleWord &operator=(const ObFTSingleWord &other) = default;
 
-  int32_t set_word(const char *word, int32_t word_len);
-  ObString get_word() const;
-  bool operator==(const ObFTSingleWord &other) const;
+  inline int32_t set_word(const char *word, int32_t word_len)
+  {
+    int ret = common::OB_SUCCESS;
+    if (nullptr == word) {
+      ret = common::OB_INVALID_ARGUMENT;
+    } else if (word_len > ObCharset::MAX_MB_LEN) {
+      ret = common::OB_SIZE_OVERFLOW;
+    } else {
+      memcpy(this->word, word, word_len);
+      this->word_len = word_len;
+    }
+    return ret;
+  }
+  inline ObString get_word() const { return ObString(word_len, word); }
+  inline bool operator==(const ObFTSingleWord &other) const
+  {
+    return this == &other
+        || (word_len == other.word_len && 0 == memcmp(word, other.word, word_len));
+  }
 
 public:
   char word[common::ObCharset::MAX_MB_LEN];

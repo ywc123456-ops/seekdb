@@ -38,6 +38,13 @@ public:
   {
   }
   int init() override;
+  void init_utf8_codes(ObIAllocator &allocator)
+  {
+    if (CHARSET_UTF8MB4 == ObCharset::charset_type_by_coll(coll_type_)) {
+      // Keep the original map usable if this optional index cannot be allocated.
+      (void)reader_.init_utf8_codes(allocator);
+    }
+  }
   int match(const ObString &single_word, ObDATrieHit &hit) const override;
   int match(const ObString &words, bool &is_match) const override;
   int match_with_hit(const ObString &single_word,

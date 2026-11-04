@@ -25,6 +25,29 @@ namespace oceanbase
 namespace storage
 {
 
+inline int compare_binary_retrieval_ids(const common::ObDatum &lhs,
+                                       const common::ObDatum &rhs,
+                                       int &cmp_ret,
+                                       const common::ObDatumAccessContext *ctx)
+{
+  if (OB_UNLIKELY(lhs.is_null() || rhs.is_null() || lhs.is_ext() || rhs.is_ext()
+                  || lhs.is_outrow() || rhs.is_outrow())) {
+    return common::ObDatumFuncs::get_basic_func(common::ObVarcharType,
+        common::CS_TYPE_BINARY)->null_first_cmp_(lhs, rhs, cmp_ret, ctx);
+  }
+  // CS_TYPE_BINARY compares bytes and then lengths; it does not ignore spaces.
+  const uint32_t len = MIN(lhs.len_, rhs.len_);
+  // Expose the common fixed key width to the compiler's optimized memcmp.
+  // Other binary strings retain the same variable-length comparison.
+  cmp_ret = len == 0 ? 0 : len == sizeof(common::ObDocId)
+      ? MEMCMP(lhs.ptr_, rhs.ptr_, sizeof(common::ObDocId))
+      : MEMCMP(lhs.ptr_, rhs.ptr_, len);
+  if (cmp_ret == 0) {
+    cmp_ret = (lhs.len_ > rhs.len_) - (lhs.len_ < rhs.len_);
+  }
+  return common::OB_SUCCESS;
+}
+
 class ObDomainIdCmp
 {
 public:
@@ -52,6 +75,10 @@ int ObDomainIdCmp::init(const ObObjMeta &obj_meta)
       STORAGE_LOG(WARN,"failed to get basic functions", K(ret), K(obj_meta));
     } else {
       cmp_func_ = id_basic_funcs->null_first_cmp_;
+      if (common::ObVarcharType == obj_meta.get_type()
+          && common::CS_TYPE_BINARY == obj_meta.get_collation_type()) {
+        cmp_func_ = compare_binary_retrieval_ids;
+      }
     }
   }
   return ret;

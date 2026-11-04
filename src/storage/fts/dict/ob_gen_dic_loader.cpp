@@ -125,6 +125,18 @@ int ObGenDicLoader::get_dic_loader(const ObString &parser_name,
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(dic_loader_key.init(parser_name, charset))) {
   } else {
+    {
+      // The common path only acquires a reference to an existing loader.
+      // Keep creation serialized, but allow concurrent parser invocations to
+      // find the immutable loader without taking the exclusive hub lock.
+      TCRLockGuard guard(lock_);
+      ret = dic_loader_map_.get_refactored(dic_loader_key, dic_loader);
+      if (OB_SUCCESS == ret) {
+        return loader_handle.set_loader(dic_loader);
+      } else if (OB_HASH_NOT_EXIST != ret) {
+        return OB_ERR_UNEXPECTED;
+      }
+    }
     TCWLockGuard guard(lock_);
     if (OB_FAIL(dic_loader_map_.get_refactored(dic_loader_key, dic_loader))) {
       if (OB_HASH_NOT_EXIST == ret) {

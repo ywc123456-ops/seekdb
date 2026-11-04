@@ -12037,6 +12037,21 @@ int ObLogPlan::prepare_text_retrieval_scan(const ObIArray<ObRawExpr *> &scan_mat
                                                  table_scan->get_text_retrieval_info()))) {
   } else {
     ObTextRetrievalInfo &tr_info = table_scan->get_text_retrieval_info();
+    // Membership-only execution is supported by an inverted-index scan.
+    // Functional row lookups and score projections retain the full BM25 path.
+    bool need_calc_relevance = true;
+    ObSEArray<ObExprConstraint, 2> constraints;
+    if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
+                                                              get_stmt(),
+                                                              match_against,
+                                                              need_calc_relevance,
+                                                              constraints))) {
+      LOG_WARN("failed to check need calc relevance", K(ret));
+    } else if (!need_calc_relevance &&
+               OB_FAIL(append_array_no_dup(get_optimizer_context().get_query_ctx()->all_expr_constraints_, constraints))) {
+      LOG_WARN("failed to append array no dup", K(ret));
+    }
+    tr_info.need_calc_relevance_ = need_calc_relevance;
     tr_info.match_expr_ = match_against;
     tr_info.pushdown_match_filter_ = match_pred;
     // The mapping table is absent when the data-table rowkey is used as the document ID.
@@ -12251,18 +12266,6 @@ int ObLogPlan::prepare_text_retrieval_info(const uint64_t ref_table_id,
     }
   }
   if (OB_SUCC(ret)) {
-    /*
-    if (OB_FAIL(ObTransformUtils::check_need_calc_match_score(get_optimizer_context().get_exec_ctx(),
-                                                              get_stmt(),
-                                                              match_against,
-                                                              need_calc_relevance,
-                                                              constraints))) {
-      LOG_WARN("failed to check need calc relevance", K(ret));
-    } else if (!need_calc_relevance &&
-               OB_FAIL(append_array_no_dup(get_optimizer_context().get_query_ctx()->all_expr_constraints_, constraints))) {
-      LOG_WARN("failed to append array no dup", K(ret));
-    }
-    */
     tr_info.match_expr_ = match_against;
     tr_info.inv_idx_tid_ = inv_idx_tid;
     tr_info.fwd_idx_tid_ = fwd_idx_tid;

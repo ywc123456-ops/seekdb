@@ -1016,6 +1016,29 @@ int ObFTParserJsonProps::show_parser_properties(const ObFTParserJsonProps &prope
 int ObFTParserProperty::parse_for_parser_helper(const ObFTParser &parser, const ObString &json_str)
 {
   int ret = OB_SUCCESS;
+  if (parser.is_ik() && json_str == ObString::make_string("{\"ik_mode\":\"smart\"}")) {
+    // Canonical immutable defaults need no JSON tree. Update the same fields
+    // as the ordinary IK branch, preserving reused objects' unrelated fields.
+    dict_table_ = ObString(ObFTSLiteral::CONFIG_NAME_DICT_TABLE);
+    stopword_table_ = ObString(ObFTSLiteral::CONFIG_NAME_STOPWORD_TABLE);
+    quantifier_table_ = ObString(ObFTSLiteral::CONFIG_NAME_QUANTIFIER_TABLE);
+    ik_mode_smart_ = true;
+    return OB_SUCCESS;
+  }
+  if (json_str.empty() && parser.is_builtin() && !parser.is_ik()) {
+    // Match the ordinary parser-specific updates, including when this property
+    // object was previously used for another parser.
+    if (parser.is_space() || parser.is_beng()) {
+      min_token_size_ = ObFTSLiteral::FT_DEFAULT_MIN_TOKEN_SIZE;
+      max_token_size_ = ObFTSLiteral::FT_DEFAULT_MAX_TOKEN_SIZE;
+    } else if (parser.is_ngram()) {
+      ngram_token_size_ = ObFTSLiteral::FT_DEFAULT_NGRAM_TOKEN_SIZE;
+    } else if (parser.is_ngram2()) {
+      min_ngram_token_size_ = ObFTSLiteral::FT_DEFAULT_MIN_NGRAM_SIZE;
+      max_ngram_token_size_ = ObFTSLiteral::FT_DEFAULT_MAX_NGRAM_SIZE;
+    }
+    return OB_SUCCESS;
+  }
   ObFTParserJsonProps props;
   if (OB_FAIL(props.init())) {
   } else if (OB_FAIL(props.parse_from_valid_str(json_str))) {

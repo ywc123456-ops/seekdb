@@ -59,13 +59,30 @@ public:
   static size_t estimate_size(size_t word_num);
 
   size_t capacity() const { return header_.capacity_; }
+  const Entry *entries() const { return header_.data; }
 
   int init(size_t word_num);
 
   // no duplicate should be inserted
   int insert(const ObString &key, ObFTWordCode code);
 
-  int find(const ObFTSingleWord &word, ObFTWordCode &code) const;
+  inline int find(const ObFTSingleWord &word, ObFTWordCode &code) const
+  {
+    int ret = common::OB_ENTRY_NOT_EXIST;
+    const uint64_t mask = header_.capacity_ - 1;
+    const bool power_of_two = (header_.capacity_ & mask) == 0;
+    const uint64_t hash = word.get_word().hash();
+    uint64_t index = power_of_two ? (hash & mask) : (hash % header_.capacity_);
+    while (header_.data[index].used) {
+      if (header_.data[index].word == word) {
+        code = header_.data[index].code;
+        ret = common::OB_SUCCESS;
+        break;
+      }
+      index = power_of_two ? ((index + 3) & mask) : ((index + 3) % header_.capacity_);
+    }
+    return ret;
+  }
 
 private:
   struct Header header_;
@@ -167,7 +184,11 @@ template <typename DataType = void>
 class ObFTDATReader
 {
 public:
-  ObFTDATReader(ObFTDAT *dat) : dat_(dat) {}
+  ObFTDATReader(ObFTDAT *dat) : dat_(dat), utf8_codes_(nullptr) {}
+
+  // Optional immutable BMP index; only populated 256-codepoint pages use memory.
+  // Arena-owned and initialized before the dictionary wrapper is published.
+  int init_utf8_codes(ObIAllocator &allocator);
 
   // Match single word with hit.
   int match_with_hit(const ObString &single_word,
@@ -175,7 +196,12 @@ public:
                      ObDATrieHit &hit) const;
 
 private:
+  struct UTF8CodePages
+  {
+    ObFTWordCode *pages[256] = {};
+  };
   ObFTDAT *dat_;
+  const UTF8CodePages *utf8_codes_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTDATReader);

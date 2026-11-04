@@ -43,7 +43,62 @@ int ObFTDictHub::init()
 int ObFTDictHub::destroy()
 {
   int ret = OB_SUCCESS;
+  // Server shutdown quiesces parser users before destroying the dictionary hub.
+  for (int i = 0; i < 3; ++i) {
+    ObIFTDict *dict = builtin_dicts_[i].exchange(nullptr, std::memory_order_acq_rel);
+    if (nullptr != dict) {
+      ObFTRangeDict *range_dict = static_cast<ObFTRangeDict *>(dict);
+      OB_DELETEx(ObFTRangeDict, &builtin_allocator_, range_dict);
+    }
+    if (nullptr != builtin_containers_[i]) {
+      OB_DELETEx(ObFTCacheRangeContainer, &builtin_allocator_, builtin_containers_[i]);
+      builtin_containers_[i] = nullptr;
+    }
+  }
+  builtin_allocator_.reset();
   is_inited_ = false;
+  return ret;
+}
+
+int ObFTDictHub::get_builtin_dict(const ObFTDictDesc &desc, ObIFTDict *&dict)
+{
+  int ret = OB_SUCCESS;
+  const int index = static_cast<int>(desc.type_) - static_cast<int>(ObFTDictType::DICT_IK_MAIN);
+  dict = nullptr;
+  if (!is_inited_) {
+    ret = OB_NOT_INIT;
+  } else if (index < 0 || index >= 3 || desc.charset_ != CHARSET_UTF8MB4
+             || desc.coll_type_ != CS_TYPE_UTF8MB4_BIN) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (nullptr != (dict = builtin_dicts_[index].load(std::memory_order_acquire))) {
+  } else {
+    std::lock_guard<std::mutex> guard(builtin_mutex_);
+    dict = builtin_dicts_[index].load(std::memory_order_relaxed);
+    if (nullptr == dict) {
+      ObFTCacheRangeContainer *container = OB_NEWx(ObFTCacheRangeContainer,
+          &builtin_allocator_, builtin_allocator_);
+      ObFTRangeDict *range_dict = nullptr;
+      if (nullptr == container) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(load_cache(desc, *container)) && OB_ENTRY_NOT_EXIST == ret) {
+        ret = build_cache(desc, *container);
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_ISNULL(range_dict = OB_NEWx(ObFTRangeDict, &builtin_allocator_,
+          builtin_allocator_, container, desc))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else if (OB_FAIL(range_dict->init())) {
+      } else {
+        builtin_containers_[index] = container;
+        dict = range_dict;
+        builtin_dicts_[index].store(dict, std::memory_order_release);
+      }
+      if (OB_FAIL(ret)) {
+        OB_DELETEx(ObFTRangeDict, &builtin_allocator_, range_dict);
+        OB_DELETEx(ObFTCacheRangeContainer, &builtin_allocator_, container);
+      }
+    }
+  }
   return ret;
 }
 int ObFTDictHub::build_cache(const ObFTDictDesc &desc, ObFTCacheRangeContainer &container)

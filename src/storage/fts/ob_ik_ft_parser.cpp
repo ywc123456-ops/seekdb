@@ -138,7 +138,9 @@ int ObIKFTParser::process_one_char(TokenizeContext &ctx,
   for (ObList<ObIIKProcessor *, ObIAllocator>::iterator iter = segmenters_.begin();
        OB_SUCC(ret) && iter != segmenters_.end();
        iter++) {
-    if (OB_FAIL((*iter)->process(ctx))) {
+    // The caller has already fetched this character. All processors observe the
+    // same cursor and only step_next() advances it after this loop.
+    if (OB_FAIL((*iter)->do_process(ctx, ch, char_len, type))) {
     }
   }
   return ret;
@@ -256,14 +258,16 @@ int ObIKFTParser::init_dict(const ObFTParserParam &param)
   if (should_read_newest_table()) {
     // clear dict cache, always false now
   } else {
-    if (OB_FAIL(init_single_dict(main_dict_desc, cache_main_))) {
-    } else if (OB_FAIL(init_single_dict(quan_dict_desc, cache_quan_))) {
-    } else if (OB_FAIL(init_single_dict(stopword_dict_desc, cache_stop_))) {
+    dicts_borrowed_ = true;
+    if (OB_FAIL(hub_->get_builtin_dict(main_dict_desc, dict_main_))) {
+    } else if (OB_FAIL(hub_->get_builtin_dict(quan_dict_desc, dict_quan_))) {
+    } else if (OB_FAIL(hub_->get_builtin_dict(stopword_dict_desc, dict_stop_))) {
     }
   }
 
   if (OB_FAIL(ret)) {
     // already logged.
+  } else if (dicts_borrowed_) {
   } else if (OB_FAIL(build_dict_from_cache(main_dict_desc, cache_main_, dict_main_))) {
   } else if (OB_FAIL(build_dict_from_cache(quan_dict_desc, cache_quan_, dict_quan_))) {
   } else if (OB_FAIL(build_dict_from_cache(stopword_dict_desc, cache_stop_, dict_stop_))) {
@@ -366,19 +370,23 @@ void ObIKFTParser::reset()
   cache_quan_.reset();
   cache_stop_.reset();
 
-  if (!OB_ISNULL(dict_main_)) {
+  if (!dicts_borrowed_ && !OB_ISNULL(dict_main_)) {
     dict_main_->~ObIFTDict();
     allocator_.free(dict_main_);
   }
-  if (!OB_ISNULL(dict_quan_)) {
+  if (!dicts_borrowed_ && !OB_ISNULL(dict_quan_)) {
     dict_quan_->~ObIFTDict();
     allocator_.free(dict_quan_);
   }
-  if (!OB_ISNULL(dict_stop_)) {
+  if (!dicts_borrowed_ && !OB_ISNULL(dict_stop_)) {
     dict_stop_->~ObIFTDict();
     allocator_.free(dict_stop_);
   }
 
+  dict_main_ = nullptr;
+  dict_quan_ = nullptr;
+  dict_stop_ = nullptr;
+  dicts_borrowed_ = false;
   is_inited_ = false;
 }
 

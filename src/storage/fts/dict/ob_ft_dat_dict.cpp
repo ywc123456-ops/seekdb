@@ -23,6 +23,7 @@
 #include "lib/allocator/ob_allocator.h"
 #include "lib/allocator/page_arena.h"
 #include "lib/list/ob_list.h"
+#include "lib/charset/ob_charset_string_helper.h"
 #include "lib/oblog/ob_log_module.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "share/rc/ob_server_runtime.h"
@@ -247,6 +248,41 @@ int ObFTDATBuilder<DATA_TYPE>::encode(const ObString &word, ObFTWordCode &code, 
 }
 
 template <typename DATA_TYPE>
+int ObFTDATReader<DATA_TYPE>::init_utf8_codes(ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  UTF8CodePages *codes = nullptr;
+  if (nullptr != utf8_codes_) {
+    // Already published; never modify a shared reader's pages.
+  } else if (OB_ISNULL(codes = OB_NEWx(UTF8CodePages, &allocator))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    const ObArrayHashMap *map = dat_->get_map();
+    for (size_t i = 0; OB_SUCC(ret) && i < map->capacity(); ++i) {
+      const ObArrayHashMap::Entry &entry = map->entries()[i];
+      if (entry.used) {
+        const ObString word = entry.word.get_word();
+        const auto *begin = reinterpret_cast<const unsigned char *>(word.ptr());
+        ob_wc_t cp = 0;
+        const int len = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(
+            begin, begin + word.length(), cp);
+        if (len > 0 && len == word.length() && cp < 65536) {
+          ObFTWordCode *&page = codes->pages[cp >> 8];
+          if (nullptr == page) {
+            page = static_cast<ObFTWordCode *>(allocator.alloc(256 * sizeof(ObFTWordCode)));
+            if (nullptr == page) ret = OB_ALLOCATE_MEMORY_FAILED;
+            else MEMSET(page, 0, 256 * sizeof(ObFTWordCode));
+          }
+          if (OB_SUCC(ret)) page[cp & 255] = entry.code;
+        }
+      }
+    }
+    if (OB_SUCC(ret)) utf8_codes_ = codes;
+  }
+  return ret;
+}
+
+template <typename DATA_TYPE>
 int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
                                              const ObDATrieHit &last_hit,
                                              ObDATrieHit &hit) const
@@ -258,9 +294,25 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
   int32_t *base = reinterpret_cast<int32_t *>(dat_->buff + dat_->base_offset_);
   int32_t *check = reinterpret_cast<int32_t *>(dat_->buff + dat_->check_offset_);
 
-  ObFTSingleWord word;
-  word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
+  bool direct = false;
+  if (nullptr != utf8_codes_ && nullptr != ft_char.ptr() && ft_char.length() > 0) {
+    const auto *begin = reinterpret_cast<const unsigned char *>(ft_char.ptr());
+    ob_wc_t cp = 0;
+    const int len = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(
+        begin, begin + ft_char.length(), cp);
+    if (len > 0 && len == ft_char.length() && cp < 65536) {
+      const ObFTWordCode *page = utf8_codes_->pages[cp >> 8];
+      code = nullptr == page ? 0 : page[cp & 255];
+      direct = true;
+      ret = code == 0 ? OB_ENTRY_NOT_EXIST : OB_SUCCESS;
+    }
+  }
+  if (!direct) {
+    ObFTSingleWord word;
+    word.set_word(ft_char.ptr(), ft_char.length());
+    ret = dat_->get_map()->find(word, code);
+  }
+  if (OB_SUCCESS != ret && OB_ENTRY_NOT_EXIST != ret) {
   } else if (OB_ENTRY_NOT_EXIST == ret) {
     ret = OB_SUCCESS;
     hit.set_unmatch();
@@ -299,30 +351,16 @@ template class ObFTDATReader<void>;
 
 ObArrayHashMap *ObFTDAT::get_map() { return reinterpret_cast<ObArrayHashMap *>(buff); }
 
-int ObArrayHashMap::find(const ObFTSingleWord &word, ObFTWordCode &code) const
-{
-  int ret = OB_ENTRY_NOT_EXIST;
-  uint64_t hash = word.get_word().hash();
-  uint64_t index = hash % header_.capacity_;
-  while (header_.data[index].used) {
-    if (header_.data[index].word == word) {
-      code = header_.data[index].code;
-      ret = OB_SUCCESS;
-      break;
-    } else {
-      index = (index + 3) % header_.capacity_;
-    }
-  }
-  return ret;
-}
-
 int ObArrayHashMap::insert(const ObString &key, ObFTWordCode code)
 {
   int ret = OB_SUCCESS;
+  const uint64_t mask = header_.capacity_ - 1;
+  // Retain lookup compatibility with dictionaries built with prime capacities.
+  const bool power_of_two = (header_.capacity_ & mask) == 0;
   uint64_t hash = key.hash();
-  uint64_t index = hash % header_.capacity_;
+  uint64_t index = power_of_two ? (hash & mask) : (hash % header_.capacity_);
   while (header_.data[index].used) {
-    index = (index + 3) % header_.capacity_;
+    index = power_of_two ? ((index + 3) & mask) : ((index + 3) % header_.capacity_);
   }
 
   header_.data[index].code = code;
@@ -354,8 +392,13 @@ size_t ObArrayHashMap::estimate_size(size_t word_num)
 
 size_t ObArrayHashMap::estimate_capacity(size_t word_num)
 {
-  constexpr size_t MIN_CAPACITY = 101;                   // prime
-  size_t capacity = MAX(word_num * 4 / 3, MIN_CAPACITY); // 75%
+  constexpr size_t MIN_CAPACITY = 128;
+  // Power-of-two capacity lets lookups replace a division with a mask.
+  size_t needed = MAX(word_num * 4 / 3, MIN_CAPACITY); // <= 75% load
+  size_t capacity = MIN_CAPACITY;
+  while (capacity < needed) {
+    capacity <<= 1;
+  }
   return capacity;
 }
 } //  namespace storage

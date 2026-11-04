@@ -134,6 +134,9 @@ public:
   virtual int get_curr_id(const ObDatum *&id_datum) const override;
 public:
   int get_token_doc_cnt(int64_t &token_doc_cnt) const { return token_iter_->get_token_doc_cnt(token_doc_cnt); }
+  int peek_ids(const ObDocIdExt *&ids, int64_t &count);
+  int peek_scored_ids(const ObDocIdExt *&ids, const double *&scores, int64_t &count);
+  void consume_ids(const int64_t count) { OB_ASSERT(count >= 0 && cur_idx_ + count <= count_); cur_idx_ += count; }
   virtual int get_dim_max_score(double &score) override {
     int ret = OB_SUCCESS;
     score = token_iter_->get_max_token_relevance();
@@ -184,6 +187,9 @@ public:
   virtual bool in_shallow_status() const override;
   // currently, for text retrieval, total_doc_cnt and token_doc_cnt is required before block max calculation
   int init_block_max_iter(const int64_t total_doc_cnt, const double avg_doc_token_cnt);
+  int peek_scored_ids(const ObDocIdExt *&ids, const double *&scores, int64_t &count)
+  { return token_iter_.peek_scored_ids(ids, scores, count); }
+  void consume_ids(const int64_t count) { token_iter_.consume_ids(count); }
 private:
   int calc_dim_max_score(
       const ObBlockMaxScoreIterParam &block_max_iter_param,

@@ -518,8 +518,16 @@ int ObRoutineSqlService::add_routine_params(ObISQLClient &sql_client,
   int ret = OB_SUCCESS;
   
   
-  ObDMLSqlSplicer dml;
+  // Package declarations can contain hundreds of parameters. Emit bounded
+  // batches inside the existing DDL transaction instead of two statements per
+  // parameter, reducing time spent holding the runtime schema lock.
+  constexpr int64_t MAX_BATCH_ROWS = 64;
+  constexpr int64_t MAX_BATCH_VALUE_BYTES = 64 * 1024;
+  ObDMLSqlSplicer live_dml;
+  ObDMLSqlSplicer history_dml;
+  ObDMLExecHelper exec(sql_client);
   ObIArray<ObRoutineParam *> &routine_params = routine_info.get_routine_params();
+  int64_t batch_rows = 0;
   for (int64_t i = 0; OB_SUCC(ret) && i < routine_params.count(); ++i) {
     ObRoutineParam *routine_param = routine_params.at(i);
     if (OB_ISNULL(routine_param)) {
@@ -527,30 +535,32 @@ int ObRoutineSqlService::add_routine_params(ObISQLClient &sql_client,
     } else {
       routine_param->set_routine_id(routine_info.get_routine_id());
       routine_param->set_schema_version(routine_info.get_schema_version());
+      if (!only_history && (OB_FAIL(gen_routine_param_dml(*routine_param, live_dml))
+          || OB_FAIL(live_dml.finish_row()))) {
+      } else if (OB_FAIL(gen_routine_param_dml(*routine_param, history_dml))
+          || OB_FAIL(history_dml.add_column("is_deleted", 0))
+          || OB_FAIL(history_dml.finish_row())) {
+      } else {
+        ++batch_rows;
+      }
     }
-    if (OB_FAIL(ret)) {
-      //do nothing
-    } else if (OB_FAIL(gen_routine_param_dml(*routine_param, dml))) {
-    } else {
-      ObDMLExecHelper exec(sql_client);
+    if (OB_SUCC(ret) && (batch_rows >= MAX_BATCH_ROWS
+        || history_dml.get_values().length() >= MAX_BATCH_VALUE_BYTES
+        || i + 1 == routine_params.count())) {
       int64_t affected_rows = 0;
-      if (!only_history) {
-        ObDMLExecHelper exec(sql_client);
-        if (OB_FAIL(exec.exec_insert(OB_ALL_ROUTINE_PARAM_TNAME, dml, affected_rows))) {
-        } else if (!is_single_row(affected_rows)) {
-          ret = OB_ERR_UNEXPECTED;
-        }
+      if (!only_history && OB_FAIL(exec.exec_batch_insert(
+          OB_ALL_ROUTINE_PARAM_TNAME, live_dml, affected_rows))) {
+      } else if (!only_history && affected_rows != batch_rows) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(exec.exec_batch_insert(
+          OB_ALL_ROUTINE_PARAM_HISTORY_TNAME, history_dml, affected_rows))) {
+      } else if (affected_rows != batch_rows) {
+        ret = OB_ERR_UNEXPECTED;
       }
-      if (OB_SUCC(ret)) {
-        const int64_t is_deleted = 0;
-        if (OB_FAIL(dml.add_column("is_deleted", is_deleted))) {
-        } else if (OB_FAIL(exec.exec_insert(OB_ALL_ROUTINE_PARAM_HISTORY_TNAME, dml, affected_rows))) {
-        } else if (!is_single_row(affected_rows)) {
-          ret = OB_ERR_UNEXPECTED;
-        }
-      }
+      live_dml.reset();
+      history_dml.reset();
+      batch_rows = 0;
     }
-    dml.reset();
   }
   return ret;
 }

@@ -61,7 +61,12 @@ private:
 
 private:
   ObArenaAllocator alloc_;
-  hash::ObHashMap<int64_t, ObIKTokenChain *> chains_;
+  // The arbitrator belongs to one parser invocation, including its nodes.
+  using ChainNode = hash::HashMapTypes<int64_t, ObIKTokenChain *>::AllocType;
+  using ChainAllocator = hash::SimpleAllocer<ChainNode,
+      hash::NodeNumTraits<ChainNode>::NODE_NUM, hash::NoPthreadDefendMode>;
+  hash::ObHashMap<int64_t, ObIKTokenChain *, hash::NoPthreadDefendMode,
+      hash::hash_func<int64_t>, hash::equal_to<int64_t>, ChainAllocator> chains_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObIKArbitrator);

@@ -38,10 +38,10 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
 
   if (ObFTCharUtil::CharType::USELESS != type) {
     // handle previous hits_ first and then check from this char
-    for (ObList<ObDATrieHit, ObIAllocator>::iterator iter = hits_.begin();
-         OB_SUCC(ret) && iter != hits_.end();
-         iter++) {
-      ObDATrieHit &hit = *iter;
+    int64_t keep = 0;
+    const int64_t previous_count = hits_.count();
+    for (int64_t i = 0; OB_SUCC(ret) && i < previous_count; ++i) {
+      ObDATrieHit &hit = hits_.at(i).value_;
       if (OB_FAIL(dict_main_.match_with_hit({char_len, ch}, hit, hit))) {
       } else if (hit.is_match()) {
         if (OB_FAIL(ctx.add_token(ctx.fulltext(),
@@ -55,11 +55,16 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
       } else if (hit.is_prefix()) {
         // nothing
       } else if (hit.is_unmatch()) {
-        hits_.erase(hit);
+        // Drop it during the stable compaction below.
       } else {
         ret = OB_UNEXPECT_INTERNAL_ERROR;
       }
+      if (OB_SUCC(ret) && !hit.is_unmatch()) {
+        if (keep != i) hits_.at(keep) = hits_.at(i);
+        ++keep;
+      }
     }
+    while (hits_.count() > keep) hits_.pop_back();
     if (OB_SUCC(ret)) {
       // Start from this char
       // find range of dict
@@ -67,29 +72,30 @@ int ObIKCJKProcessor::do_process(TokenizeContext &ctx,
       if (OB_FAIL(dict_main_.match({char_len, ch}, hit))) {
       } else if (hit.is_match()) {
         // output token
-        hits_.push_back(hit);
-        ctx.add_token(ctx.fulltext(),
+        if (OB_FAIL(hits_.push_back(PendingHit(hit)))) {
+        } else if (OB_FAIL(ctx.add_token(ctx.fulltext(),
                       ctx.get_cursor(),
                       char_len,
                       1,
-                      ObIKTokenType::IK_CHINESE_TOKEN);
+                      ObIKTokenType::IK_CHINESE_TOKEN))) {
+        }
       } else if (hit.is_prefix()) {
-        hits_.push_back(hit);
+        ret = hits_.push_back(PendingHit(hit));
       } else {
         // ignore mismatch
       }
     }
   } else {
     // stop previous match
-    hits_.clear();
+    hits_.reuse();
   }
 
   if (OB_SUCC(ret)) {
     if (ctx.is_last()) {
-      hits_.clear();
+      hits_.reuse();
     }
   } else {
-    hits_.clear();
+    hits_.reuse();
   }
 
   return ret;

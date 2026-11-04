@@ -350,7 +350,9 @@ int ObDDLLocalBuilder::push_task(ObAsyncTask &task)
 
 int64_t ObDDLLocalBuilder::get_thread_cnt_() const
 {
-  return lib::is_mini_mode() ? 1 : 16;
+  // Two independent auxiliary builds can make progress concurrently. The
+  // FTS planner budgets four PX workers per auxiliary in mini mode.
+  return lib::is_mini_mode() ? 2 : 16;
 }
 
 }  // end namespace share

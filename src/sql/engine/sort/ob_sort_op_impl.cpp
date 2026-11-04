@@ -21,6 +21,7 @@
 #include "query/engine/basic/ob_encoded_sort_row.h"
 #include "data_plane/encoding/ob_cpu_features.h"
 #include "sql/engine/px/p2p_datahub/ob_pushdown_topn_filter_msg.h"
+#include "lib/utility/pdqsort.h"
 
 namespace oceanbase
 {
@@ -1457,10 +1458,10 @@ int ObSortOpImpl::do_partition_sort(common::ObIArray<ObChunkDatumStore::StoredRo
           } else {
             enable_encode_sortkey_ = false;
             comp_.enable_encode_sortkey_ = false;
-            lib::ob_sort(&rows.at(0) + rows_last, &rows.at(0) + rows_idx, CopyableComparer(comp_));
+            ::pdqsort(&rows.at(0) + rows_last, &rows.at(0) + rows_idx, CopyableComparer(comp_));
           }
         } else {
-          lib::ob_sort(&rows.at(0) + rows_last, &rows.at(0) + rows_idx, CopyableComparer(comp_));
+          ::pdqsort(&rows.at(0) + rows_last, &rows.at(0) + rows_idx, CopyableComparer(comp_));
         }
       }
     }
@@ -1859,10 +1860,10 @@ int ObSortOpImpl::sort_inmem_data()
         } else {
           enable_encode_sortkey_ = false;
           comp_.enable_encode_sortkey_ = false;
-          lib::ob_sort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
+          ::pdqsort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
         }
       } else {
-        lib::ob_sort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
+        ::pdqsort(&rows_->at(begin), &rows_->at(0) + rows_->count(), CopyableComparer(comp_));
       }
       if (OB_SUCCESS != comp_.ret_) {
         ret = comp_.ret_;

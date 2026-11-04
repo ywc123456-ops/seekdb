@@ -165,6 +165,14 @@ int ObStringDiffDecoder::batch_decode(
     if (OB_FAIL(ret)) {
     } else if (OB_ISNULL(buf = static_cast<char *>(ctx.allocator_->alloc(buf_size * row_cap)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else if (string_size == 16 && ctx.obj_meta_.get_collation_type() == CS_TYPE_BINARY) {
+      // Binary 16-byte IDs share many bytes; expand the common runs once.
+      char shared[16] = {};
+      header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),
+          header_->common_data(), shared);
+      for (int64_t i = 0; i < row_cap; ++i) {
+        MEMCPY(buf + i * buf_size, shared, 16);
+      }
     } else {
       for (int64_t i = 0; i < row_cap; ++i) {
         header_->copy_string(ObStringDiffHeader::LeftToRight(), std::logical_not<uint8_t>(),

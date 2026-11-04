@@ -58,7 +58,7 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
 
   ObIJsonBase *json_result = nullptr;
-  TokenizeParam param;
+  TokenizeParam param(temp_allocator);
 
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
@@ -85,8 +85,6 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
   const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
-
-  ObArenaAllocator tmp_parse_alloc(ObMemAttr("Tmp buffer"));
 
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
@@ -123,8 +121,8 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
   return ret;
 }
 
-ObExprTokenize::TokenizeParam ::TokenizeParam()
-  : allocator_(ObMemAttr("TokenizeParam")),
+ObExprTokenize::TokenizeParam::TokenizeParam(ObArenaAllocator &allocator)
+  : allocator_(allocator),
     parser_name_(ObString(OB_DEFAULT_FULLTEXT_PARSER_NAME)),
     meta_(),
     fulltext_(),
@@ -375,6 +373,20 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
 int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
 {
   int ret = OB_SUCCESS;
+  if (properties.empty()) {
+    storage::ObFTParser parser;
+    if (OB_FAIL(parser.parse_from_str(parser_name_.ptr(), parser_name_.length()))) {
+      return ret;
+    }
+    // Defaults are immutable. Preserve custom-property validation below while
+    // avoiding a JSON object build/serialize/parse round trip for omitted options.
+    if (parser.is_ik()) {
+      properties_ = ObString::make_string("{\"ik_mode\":\"smart\"}");
+    } else {
+      properties_.reset();
+    }
+    return OB_SUCCESS;
+  }
   storage::ObFTParserJsonProps parser_properties;
 
   if (OB_FAIL(parser_properties.init())) {

@@ -84,6 +84,15 @@ int ObTextRetrievalTokenIter::init(const ObTextRetrievalScanIterParam &iter_para
   } else {
     skip_->init(max_batch_size_);
   }
+  if (OB_SUCC(ret) && nullptr == skip_) {
+    // Both scored and membership-only batches use the token skip bitmap.
+    if (OB_ISNULL(skip_ = sql::to_bit_vector(
+        allocator_->alloc(sql::ObBitVector::memory_size(max_batch_size_))))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      skip_->init(max_batch_size_);
+    }
+  }
   is_inited_ = true;
   return ret;
 }
@@ -96,7 +105,7 @@ void ObTextRetrievalTokenIter::reset()
 
 void ObTextRetrievalTokenIter::reuse()
 {
-  if (inv_idx_agg_cache_mode_ && !inv_idx_agg_param_->need_switch_param_) {
+  if (inv_idx_agg_cache_mode_ && nullptr != inv_idx_agg_param_ && !inv_idx_agg_param_->need_switch_param_) {
     // do nothing
   } else {
     token_doc_cnt_calculated_ = false;
@@ -203,7 +212,7 @@ int ObTextRetrievalTokenIter::get_next_row()
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-  } else if (!token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
+  } else if (need_calc_relevance() && !token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
   } else if (OB_FAIL(query::das_scan_next_row(inv_idx_scan_iter_))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
     }
@@ -242,7 +251,7 @@ int ObTextRetrievalTokenIter::get_next_batch(const int64_t capacity, int64_t &co
   count = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
-  } else if (!token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
+  } else if (need_calc_relevance() && !token_doc_cnt_calculated_ && OB_FAIL(estimate_token_doc_cnt())) {
   } else if (OB_FAIL(query::das_scan_next_rows(
                  inv_idx_scan_iter_, count, OB_MIN(max_batch_size_, capacity)))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
@@ -302,10 +311,11 @@ int ObTextRetrievalTokenIter::advance_to(const ObDatum &id_datum)
 int ObTextRetrievalTokenIter::update_scan_param(const ObString &token, common::ObArenaAllocator &allocator)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(inv_idx_agg_param_->key_ranges_.count() != 1)) {
+  ObTableScanParam *range_param = need_inv_idx_agg() ? inv_idx_agg_param_ : inv_idx_scan_param_;
+  if (OB_ISNULL(range_param) || OB_UNLIKELY(range_param->key_ranges_.count() != 1)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
-    ObNewRange scan_range = inv_idx_agg_param_->key_ranges_.at(0);
+    ObNewRange scan_range = range_param->key_ranges_.at(0);
     ObObj tmp_obj;
     tmp_obj.set_string(ObVarcharType, token);
     tmp_obj.set_meta_type(scan_range.start_key_.get_obj_ptr()->meta_);
@@ -436,6 +446,9 @@ int ObTextRetrievalDaaTTokenIter::init(const ObTextRetrievalScanIterParam &iter_
       max_batch_size_ = OB_MAX(iter_param.eval_ctx_->max_batch_size_, 1);
       common::ObDatumBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(inv_scan_domain_id_col_->datum_meta_.type_, CS_TYPE_BINARY);
       cmp_func_ = basic_funcs->null_first_cmp_;
+      if (ObVarcharType == inv_scan_domain_id_col_->datum_meta_.type_) {
+        cmp_func_ = compare_binary_retrieval_ids;
+      }
       if (OB_ISNULL(cmp_func_)) {
         ret = OB_ERR_UNEXPECTED;
       } else if (FALSE_IT(relevance_.set_allocator(allocator_))) {
@@ -506,10 +519,13 @@ int ObTextRetrievalDaaTTokenIter::save_relevances_and_docids()
     cur_idx_ = 0;
     const ObDatumVector &relevance_datum = relevance_expr_->locate_expr_datumvector(*eval_ctx_);
     const ObDatumVector &doc_id_datum = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
+    OB_ASSERT(count_ <= doc_id_.count() && count_ <= relevance_.count());
+    ObDocIdExt *doc_ids = doc_id_.get_data();
+    double *scores = relevance_.get_data();
     for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
       if (OB_LIKELY(!token_iter_->get_skip()->at(i))) {
-        relevance_[i] = relevance_datum.at(i)->get_double();
-        if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
+        scores[i] = relevance_datum.at(i)->get_double();
+        if (OB_FAIL(doc_ids[i].from_datum(*doc_id_datum.at(i)))) {
         }
       }
     }
@@ -525,9 +541,11 @@ int ObTextRetrievalDaaTTokenIter::save_docids()
   } else {
     cur_idx_ = 0;
     const ObDatumVector &doc_id_datum = inv_scan_domain_id_col_->locate_expr_datumvector(*eval_ctx_);
+    OB_ASSERT(count_ <= doc_id_.count());
+    ObDocIdExt *doc_ids = doc_id_.get_data();
     for (int64_t i = 0; OB_SUCC(ret) && i < count_; ++i) {
       if (OB_LIKELY(!token_iter_->get_skip()->at(i))) {
-        if (OB_FAIL(doc_id_[i].from_datum(*doc_id_datum.at(i)))) {
+        if (OB_FAIL(doc_ids[i].from_datum(*doc_id_datum.at(i)))) {
         };
       }
     }
@@ -538,6 +556,34 @@ int ObTextRetrievalDaaTTokenIter::save_docids()
 int ObTextRetrievalDaaTTokenIter::get_next_batch(const int64_t capacity, int64_t &count)
 {
   return OB_NOT_IMPLEMENT;
+}
+
+int ObTextRetrievalDaaTTokenIter::peek_ids(const ObDocIdExt *&ids, int64_t &count)
+{
+  int ret = OB_SUCCESS;
+  ids = nullptr;
+  count = 0;
+  while (OB_SUCC(ret) && (cur_idx_ < 0 || cur_idx_ >= count_)) {
+    cur_idx_ = count_ - 1;
+    ret = get_next_row();
+  }
+  if (OB_SUCC(ret)) {
+    ids = doc_id_.get_data() + cur_idx_;
+    count = count_ - cur_idx_;
+  }
+  return ret;
+}
+
+int ObTextRetrievalDaaTTokenIter::peek_scored_ids(
+    const ObDocIdExt *&ids, const double *&scores, int64_t &count)
+{
+  ids = nullptr;
+  scores = nullptr;
+  count = 0;
+  if (nullptr == relevance_expr_) return OB_INVALID_ARGUMENT;
+  const int ret = peek_ids(ids, count);
+  if (OB_SUCCESS == ret) scores = relevance_.get_data() + cur_idx_;
+  return ret;
 }
 
 int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
@@ -552,7 +598,7 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
   while (OB_SUCC(ret) && !find) {
     if (cur_idx_ < count_) {
       if (OB_FAIL(cmp_func_(
-              id_datum, doc_id_[cur_idx_].get_datum(), result, nullptr))) {
+              id_datum, doc_id_.get_data()[cur_idx_].get_datum(), result, nullptr))) {
       } else if (result <= 0) {
         find = true;
       } else {
@@ -567,7 +613,7 @@ int ObTextRetrievalDaaTTokenIter::advance_to(const ObDatum &id_datum)
     } else if (cur_idx_ != 0) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(cmp_func_(
-                   id_datum, doc_id_[cur_idx_].get_datum(), result, nullptr))) {
+                   id_datum, doc_id_.get_data()[cur_idx_].get_datum(), result, nullptr))) {
     } else if (result <= 0) {
       find = true;
     } else {
@@ -583,7 +629,10 @@ int ObTextRetrievalDaaTTokenIter::get_curr_score(double &score) const
   if (OB_UNLIKELY(cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
   } else if (relevance_expr_) {
-    score = relevance_[cur_idx_];
+    score = relevance_.get_data()[cur_idx_];
+  } else {
+    // Natural-language membership predicates need a positive match marker.
+    score = 1.0;
   }
   return ret;
 }
@@ -594,7 +643,7 @@ int ObTextRetrievalDaaTTokenIter::get_curr_id(const ObDatum *&id_datum) const
   if (OB_UNLIKELY(cur_idx_ >= count_)) {
     ret = OB_ARRAY_OUT_OF_RANGE;
   } else {
-    id_datum = &doc_id_[cur_idx_].get_datum();
+    id_datum = &doc_id_.get_data()[cur_idx_].get_datum();
   }
   return ret;
 }
